@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Scraper Extension</title>
+  </head>
+  <body>
+    <div id="app">
+      <h2>Web Scraper</h2>
+      <div class="card">
+        <label for="apiKey">API Key</label>
+        <input type="password" id="apiKey" placeholder="Enter LLM API Key">
+        
+        <label for="listSelector">List Selector</label>
+        <div class="input-group">
+          <input type="text" id="listSelector" placeholder="e.g., .product-item">
+          <button id="pickListBtn" class="pick-btn" title="Pick element from page">🎯</button>
+        </div>
+
+        <label for="loadMoreSelector">Load More (더보기) Selector</label>
+        <div class="input-group">
+          <input type="text" id="loadMoreSelector" placeholder="e.g., .btn-more">
+          <button id="pickLoadMoreBtn" class="pick-btn" title="Pick element from page">🎯</button>
+        </div>
+
+        <label for="detailSelector">Detail Selector</label>
+        <div class="input-group">
+          <input type="text" id="detailSelector" placeholder="e.g., .spec-table">
+          <button id="pickDetailBtn" class="pick-btn" title="Pick element from page">🎯</button>
+        </div>
+
+        <button id="saveBtn">Save Configuration</button>
+        <button id="startBtn" class="primary">Start Extraction</button>
+      </div>
+      <p id="statusMessage"></p>
+    </div>
+    <script type="module" src="./src/popup.ts"></script>
+  </body>
+</html>
