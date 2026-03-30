@@ -7,17 +7,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const pickListBtn = document.getElementById('pickListBtn') as HTMLButtonElement;
   const pickLoadMoreBtn = document.getElementById('pickLoadMoreBtn') as HTMLButtonElement;
   const pickDetailBtn = document.getElementById('pickDetailBtn') as HTMLButtonElement;
+  const pickApiSnifferBtn = document.getElementById('pickApiSnifferBtn') as HTMLButtonElement;
   const apiKeyInput = document.getElementById('apiKey') as HTMLInputElement;
   const listSelectorInput = document.getElementById('listSelector') as HTMLInputElement;
   const loadMoreSelectorInput = document.getElementById('loadMoreSelector') as HTMLInputElement;
   const detailSelectorInput = document.getElementById('detailSelector') as HTMLInputElement;
+  const apiSnifferInput = document.getElementById('apiSniffer') as HTMLInputElement;
   const statusMsg = document.getElementById('statusMessage') as HTMLParagraphElement;
 
-  chrome.storage.sync.get(['apiKey', 'listSelector', 'loadMoreSelector', 'detailSelector'], (result) => {
+  chrome.storage.sync.get(['apiKey', 'listSelector', 'loadMoreSelector', 'detailSelector', 'apiExtractionRule'], (result) => {
     if (result.apiKey) apiKeyInput.value = result.apiKey;
     if (result.listSelector) listSelectorInput.value = result.listSelector;
     if (result.loadMoreSelector) loadMoreSelectorInput.value = result.loadMoreSelector;
     if (result.detailSelector) detailSelectorInput.value = result.detailSelector;
+    if (result.apiExtractionRule) apiSnifferInput.value = 'Rule Saved ✅';
   });
 
   chrome.storage.onChanged.addListener((changes, namespace) => {
@@ -25,10 +28,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (changes.listSelector) listSelectorInput.value = changes.listSelector.newValue;
       if (changes.loadMoreSelector) loadMoreSelectorInput.value = changes.loadMoreSelector.newValue;
       if (changes.detailSelector) detailSelectorInput.value = changes.detailSelector.newValue;
+      if (changes.apiExtractionRule) apiSnifferInput.value = 'Rule Saved ✅';
     }
   });
 
-  const sendPickMessage = async (target: 'listSelector' | 'loadMoreSelector' | 'detailSelector') => {
+  const sendPickMessage = async (target: 'listSelector' | 'loadMoreSelector' | 'detailSelector' | 'apiSniffer') => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     try {
       if (tab.id) {
@@ -44,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   pickListBtn.addEventListener('click', () => sendPickMessage('listSelector'));
   pickLoadMoreBtn.addEventListener('click', () => sendPickMessage('loadMoreSelector'));
   pickDetailBtn.addEventListener('click', () => sendPickMessage('detailSelector'));
+  pickApiSnifferBtn.addEventListener('click', () => sendPickMessage('apiSniffer'));
 
   saveBtn.addEventListener('click', () => {
     const config = {
