@@ -21,10 +21,14 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
   const ignoreWords = ['analytics', 'pixel', 'log', 'tracking', 'css', 'js', 'png', 'jpg'];
   if (ignoreWords.some(w => url.includes(w))) return;
 
+  const requestId = data.requestId;
+
   // Update or push to sniffedRequests
-  const existingIdx = sniffedRequests.findIndex(r => r.url === data.url && r.method === data.method && r.body === data.body);
+  const existingIdx = sniffedRequests.findIndex(r => r.requestId === requestId);
   if (existingIdx > -1) {
-    sniffedRequests[existingIdx].response = data.response;
+    if (data.stage === 'complete') {
+        sniffedRequests[existingIdx].response = data.response;
+    }
   } else {
     sniffedRequests.push(data);
   }
@@ -34,8 +38,7 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
   if (logContainer) {
     logContainer.style.display = 'block';
     
-    // Check if item already exists in UI to avoid duplicates, or just prepend if new
-    const itemId = `sniff-item-${btoa(data.url).substring(0, 16)}`;
+    const itemId = `sniff-item-${requestId}`;
     let item = document.getElementById(itemId);
     
     if (!item) {
@@ -48,15 +51,19 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
       item.style.gap = '6px';
       item.onmouseover = () => item!.style.background = 'rgba(255,255,255,0.1)';
       item.onmouseout = () => item!.style.background = 'transparent';
-      item.onclick = () => showResponsePreview(data);
+      item.onclick = () => showResponsePreview(sniffedRequests.find(r => r.requestId === requestId));
       logContainer.prepend(item);
     }
     
+    const statusIcon = data.stage === 'complete' ? '✅' : '⏳';
+    const statusColor = data.stage === 'complete' ? '#34d399' : '#fbbf24';
+    
     item.innerHTML = `
-      <span style="color:#38bdf8;">🔍</span>
-      <div style="overflow:hidden; text-overflow:ellipsis;">
+      <span style="color:${statusColor}; font-size:10px;">${statusIcon}</span>
+      <div style="overflow:hidden; text-overflow:ellipsis; flex:1;">
         [${data.type.toUpperCase()}] ${data.method} ${data.url.split('/').pop()?.split('?')[0] || data.url}
       </div>
+      ${data.stage === 'complete' ? '<span style="font-size:10px; color:#9ca3af;">🔍</span>' : ''}
     `;
     
     const countEl = document.getElementById('web-scraper-sniff-count');
@@ -473,21 +480,16 @@ const handleClick = (e: MouseEvent) => {
   if (activeOverlay && activeOverlay.contains(target)) return;
 
   if (currentTarget === 'apiSniffer') {
-    // 1. Immediately activate sniffing so the first click's request is caught
-    isSniffingActive = true;
-    sniffedRequests = [];
+    // 1. Sniffing is ALREADY active from startPicking, but we reset for this specific click context
+    // This allows us to catch the absolute first frame of the click's request
     
-    showToast("🛰️ [WEB SCRAPER] 발견 모드 가동 중... 클릭 직후의 통신을 낚아챕니다!", 3000);
+    showToast("🛰️ [WEB SCRAPER] 버튼 클릭 감지! 통신 내역을 분석용으로 낚아챕니다.", 3000);
 
-    // Reset UI for new capture
+    // Reset UI overlay state (but don't reset sniffedRequests yet, keep what we caught since mode entry)
     const timerWrap = document.getElementById('web-scraper-timer-wrap');
     const timerBar = document.getElementById('web-scraper-timer-bar');
-    const logContainer = document.getElementById('web-scraper-sniff-log');
     if (timerWrap) timerWrap.style.display = 'block';
-    if (logContainer) {
-        logContainer.innerHTML = '';
-        logContainer.style.display = 'none';
-    }
+    // Note: we don't clear logContainer here to preserve any early-caught request
 
     let startTime = Date.now();
     const duration = 2500;
@@ -567,6 +569,12 @@ const startPicking = (target: 'listSelector' | 'loadMoreSelector' | 'detailSelec
   currentTarget = target;
   injectStyles();
   showOverlay(target);
+
+  if (target === 'apiSniffer') {
+    isSniffingActive = true;
+    sniffedRequests = [];
+    console.log("🛰️ [WEB SCRAPER] Early sniffing activated. Watching all network traffic...");
+  }
 
   document.addEventListener('mouseover', handleMouseOver, true);
   document.addEventListener('mouseout', handleMouseOut, true);

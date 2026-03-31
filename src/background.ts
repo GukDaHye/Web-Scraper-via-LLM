@@ -269,17 +269,25 @@ function mainWorldSniffer() {
       else if (args[1].body instanceof URLSearchParams) { body = args[1].body.toString(); }
     }
     
+    const requestId = Math.random().toString(36).substring(2, 10);
+    
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { requestId, stage: 'start', type: 'fetch', url: url, method: method, body: body }
+    }));
+
     const response = await originalFetch.apply(this, args);
     
+    // Stage 2: Request Complete (After Response)
     try {
       const clonedResponse = response.clone();
       const bodyText = await clonedResponse.text();
       window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-        detail: { type: 'fetch', url: url, method: method, body: body, response: bodyText }
+        detail: { requestId, stage: 'complete', type: 'fetch', url: url, method: method, body: body, response: bodyText }
       }));
     } catch (e) {
       window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-        detail: { type: 'fetch', url: url, method: method, body: body }
+        detail: { requestId, stage: 'complete', type: 'fetch', url: url, method: method, body: body, response: '(Cannot read body)' }
       }));
     }
     
@@ -291,6 +299,7 @@ function mainWorldSniffer() {
   XMLHttpRequest.prototype.open = function(method: string, url: string | URL, ...args: any[]) {
     (this as any)._method = method; 
     (this as any)._url = url;
+    (this as any)._requestId = Math.random().toString(36).substring(2, 10);
     return originalXhrOpen.apply(this, [method, url, ...args] as any);
   };
   XMLHttpRequest.prototype.send = function(body: any) {
@@ -298,21 +307,38 @@ function mainWorldSniffer() {
     if (typeof body === 'string') { parsedBody = body; } 
     else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
 
+    const requestId = (this as any)._requestId;
+
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { requestId, stage: 'start', type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody }
+    }));
+
+    // Stage 2: Request Complete (After Response)
     this.addEventListener('load', function() {
-      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-        detail: { 
-          type: 'xhr', 
-          url: (this as any)._url, 
-          method: (this as any)._method, 
-          body: parsedBody, 
-          response: (this as any).responseText 
+      let responseBody = '';
+      try {
+        if (!this.responseType || this.responseType === 'text') {
+          responseBody = this.responseText;
+        } else if (this.responseType === 'json') {
+          responseBody = JSON.stringify(this.response);
+        } else if (this.responseType === 'document') {
+          responseBody = this.response.documentElement.outerHTML;
+        } else {
+          responseBody = '[Non-textual data: ' + this.responseType + ']';
         }
+      } catch (e) {
+        responseBody = '[Err reading response]';
+      }
+
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { requestId, stage: 'complete', type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody, response: responseBody }
       }));
     });
 
     return originalXhrSend.apply(this, [body]);
   };
-  console.log("🚀 [WEB SCRAPER] Network Sniffer Injection Success (via Background World-Injection)");
+  console.log("🚀 [WEB SCRAPER] Network Sniffer Injection Success (Reliability V2)");
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {

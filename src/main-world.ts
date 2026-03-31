@@ -12,24 +12,25 @@
     if (args[1] && args[1].method) { method = args[1].method; } 
     else if (req instanceof Request) { method = req.method; }
 
-    if (args[1] && args[1].body) {
-      if (typeof args[1].body === 'string') { body = args[1].body; } 
-      else if (args[1].body instanceof URLSearchParams) { body = args[1].body.toString(); }
-      else if (args[1].body instanceof FormData) { /* simplified */ }
-    }
+    const requestId = Math.random().toString(36).substring(2, 10);
     
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { requestId, stage: 'start', type: 'fetch', url, method, body }
+    }));
+
     const response = await originalFetch.apply(this, args);
     
-    // Capture response body for the sniffer
+    // Stage 2: Request Complete (After Response)
     try {
       const clonedResponse = response.clone();
       const bodyText = await clonedResponse.text();
       window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-        detail: { type: 'fetch', url, method, body, response: bodyText }
+        detail: { requestId, stage: 'complete', type: 'fetch', url, method, body, response: bodyText }
       }));
     } catch (e) {
       window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-        detail: { type: 'fetch', url, method, body }
+        detail: { requestId, stage: 'complete', type: 'fetch', url, method, body, response: '(Cannot read body: ' + e + ')' }
       }));
     }
     
@@ -41,6 +42,7 @@
   XMLHttpRequest.prototype.open = function(method: string, url: string | URL, ...args: any[]) {
     (this as any)._method = method; 
     (this as any)._url = url;
+    (this as any)._requestId = Math.random().toString(36).substring(2, 10);
     return originalXhrOpen.apply(this, [method, url, ...args] as any);
   };
   XMLHttpRequest.prototype.send = function(body: any) {
@@ -48,14 +50,46 @@
     if (typeof body === 'string') { parsedBody = body; } 
     else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
 
+    const requestId = (this as any)._requestId;
+
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { 
+        requestId, 
+        stage: 'start',
+        type: 'xhr', 
+        url: (this as any)._url, 
+        method: (this as any)._method, 
+        body: parsedBody 
+      }
+    }));
+
+    // Stage 2: Request Complete (After Response)
     this.addEventListener('load', function() {
+      let responseBody = '';
+      try {
+        if (!this.responseType || this.responseType === 'text') {
+          responseBody = this.responseText;
+        } else if (this.responseType === 'json') {
+          responseBody = JSON.stringify(this.response);
+        } else if (this.responseType === 'document') {
+          responseBody = this.response.documentElement.outerHTML;
+        } else {
+          responseBody = '[Non-textual data: ' + this.responseType + ']';
+        }
+      } catch (e) {
+        responseBody = '[Err reading response: ' + e + ']';
+      }
+
       window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
         detail: { 
+          requestId, 
+          stage: 'complete',
           type: 'xhr', 
           url: (this as any)._url, 
           method: (this as any)._method, 
           body: parsedBody, 
-          response: (this as any).responseText 
+          response: responseBody 
         }
       }));
     });
