@@ -299,19 +299,28 @@ const showOverlay = (target: string) => {
 };
 
 const showRecipeModal = (ruleJson: any) => {
+  if (document.getElementById('web-scraper-recipe-modal')) {
+    document.getElementById('web-scraper-recipe-modal')?.remove();
+  }
+
   const modal = document.createElement('div');
   modal.id = 'web-scraper-recipe-modal';
   modal.style.cssText = `
     position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center;
     z-index: 999999; font-family: -apple-system, system-ui, sans-serif;
   `;
 
   const content = document.createElement('div');
   content.style.cssText = `
-    background: white; padding: 24px; border-radius: 12px; max-width: 550px; width: 90%;
-    box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 16px;
+    background: white; padding: 28px; border-radius: 16px; max-width: 900px; width: 95%;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); display: flex; flex-direction: row; gap: 28px;
+    max-height: 85vh; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
   `;
+
+  // --- 좌측 컬럼: AI 판독 결과 ---
+  const leftCol = document.createElement('div');
+  leftCol.style.cssText = 'flex: 1.3; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; padding-right: 10px;';
 
   const typeColor = ruleJson.renderingType === 'CSR' ? '#3b82f6' : '#10b981';
 
@@ -320,76 +329,139 @@ const showRecipeModal = (ruleJson: any) => {
   titleRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
   
   const h2 = document.createElement('h2');
-  h2.style.cssText = 'margin:0; font-size:1.4rem; color:#111;';
+  h2.style.cssText = 'margin:0; font-size:1.5rem; color:#1e293b; font-weight: 800;';
   h2.textContent = '🔍 글로벌 사이트 판독 리포트';
   
   const badge = document.createElement('span');
-  badge.style.cssText = `background:${typeColor}; color:white; padding:4px 10px; border-radius:20px; font-size:12px; font-weight:bold;`;
+  badge.style.cssText = `background:${typeColor}20; color:${typeColor}; padding:6px 12px; border-radius:8px; font-size:13px; font-weight:bold; border: 1px solid ${typeColor}40;`;
   badge.textContent = `${ruleJson.renderingType} 방식`;
   
   titleRow.appendChild(h2);
   titleRow.appendChild(badge);
-  content.appendChild(titleRow);
+  leftCol.appendChild(titleRow);
 
   // Diagnosis Box
   const diagBox = document.createElement('div');
-  diagBox.style.cssText = `background:#f8fafc; padding:15px; border-radius:8px; border-left:4px solid ${typeColor};`;
+  diagBox.style.cssText = `background:#f8fafc; padding:18px; border-radius:10px; border-left:5px solid ${typeColor};`;
   
   const diagTitle = document.createElement('strong');
-  diagTitle.style.cssText = 'display:block; margin-bottom:5px; color:#1e293b;';
+  diagTitle.style.cssText = 'display:block; margin-bottom:8px; color:#1e293b; font-size: 15px;';
   diagTitle.textContent = '🤖 AI 판독 근거';
   
   const diagText = document.createElement('p');
-  diagText.style.cssText = 'margin:0; font-size:14px; color:#475569; line-height:1.5;';
+  diagText.style.cssText = 'margin:0; font-size:14px; color:#475569; line-height:1.6;';
   diagText.textContent = ruleJson.diagnosis_ko || "판독 근거를 생성하지 못했습니다.";
   
   diagBox.appendChild(diagTitle);
   diagBox.appendChild(diagText);
-  content.appendChild(diagBox);
+  leftCol.appendChild(diagBox);
 
   // Rule Box
   const ruleBox = document.createElement('div');
   ruleBox.style.cssText = 'font-size:13px; color:#64748b;';
   
   const ruleTitle = document.createElement('strong');
-  ruleTitle.style.cssText = 'display:block; margin-bottom:5px;';
-  ruleTitle.textContent = '📋 추출 규칙 상세';
+  ruleTitle.style.cssText = 'display:block; margin-bottom:8px; color:#1e293b;';
+  ruleTitle.textContent = '📋 추출 규칙 상세 (Extraction Rule)';
   
   const pre = document.createElement('pre');
-  pre.style.cssText = 'background:#1e293b; color:#e2e8f0; padding:10px; border-radius:6px; overflow:auto; max-height:150px; margin:0;';
+  pre.style.cssText = 'background:#0f172a; color:#34d399; padding:16px; border-radius:10px; overflow:auto; max-height:250px; margin:0; font-family:monospace; line-height:1.5; border: 1px solid #1e293b;';
   pre.textContent = JSON.stringify(ruleJson, null, 2);
   
   ruleBox.appendChild(ruleTitle);
   ruleBox.appendChild(pre);
-  content.appendChild(ruleBox);
+  leftCol.appendChild(ruleBox);
 
   // Buttons Row
   const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex; justify-content:flex-end; gap:10px; margin-top:10px;';
-  
-  const saveBtn = document.createElement('button');
-  saveBtn.style.cssText = 'padding:10px 20px; background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold;';
-  saveBtn.textContent = '✅ 확인 및 저장';
-  saveBtn.onclick = () => {
-     chrome.storage.sync.set({ apiExtractionRule: JSON.stringify(ruleJson) }, () => {
-        showToast("🎯 추출 규칙이 성공적으로 저장되었습니다! 이제 추출을 시작하세요.", 4000);
-        modal.remove();
-     });
-  };
+  btnRow.style.cssText = 'display:flex; justify-content:flex-end; gap:12px; margin-top: auto; padding-top: 10px;';
   
   const closeBtn = document.createElement('button');
-  closeBtn.style.cssText = 'padding:10px 20px; background:#f1f5f9; color:#475569; border:none; border-radius:6px; cursor:pointer;';
   closeBtn.textContent = '닫기';
-  closeBtn.onclick = () => {
-     modal.remove();
-  };
-  
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(closeBtn);
-  content.appendChild(btnRow);
+  closeBtn.style.cssText = 'padding: 10px 20px; background: #f1f5f9; color: #475569; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; transition: background 0.2s;';
+  closeBtn.onclick = () => modal.remove();
+  closeBtn.onmouseover = () => closeBtn.style.background = '#e2e8f0';
+  closeBtn.onmouseout = () => closeBtn.style.background = '#f1f5f9';
 
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = '규칙 저장하기';
+  saveBtn.style.cssText = `padding: 10px 24px; background: ${typeColor}; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; box-shadow: 0 4px 6px -1px ${typeColor}40; transition: all 0.2s;`;
+  saveBtn.onclick = () => {
+    chrome.storage.sync.set({ [`rule_${window.location.hostname}`]: ruleJson }, () => {
+      showToast("💾 규칙이 브라우저에 저장되었습니다.", 3000);
+      modal.remove();
+      stopPicking();
+    });
+  };
+  saveBtn.onmouseover = () => saveBtn.style.transform = 'translateY(-1px)';
+  saveBtn.onmouseout = () => saveBtn.style.transform = 'translateY(0)';
+
+  btnRow.appendChild(closeBtn);
+  btnRow.appendChild(saveBtn);
+  leftCol.appendChild(btnRow);
+
+  // --- 우측 컬럼: 실시간 수집 내역 ---
+  const rightCol = document.createElement('div');
+  rightCol.style.cssText = 'flex: 0.7; display: flex; flex-direction: column; gap: 14px; border-left: 1px solid #f1f5f9; padding-left: 24px; overflow-y: auto;';
+
+  const netTitle = document.createElement('h3');
+  netTitle.style.cssText = 'margin:0; font-size:1.1rem; color:#1e293b; display:flex; align-items:center; gap:8px;';
+  netTitle.innerHTML = `🌐 Captured Network <span style="background:#f1f5f9; color:#64748b; padding:2px 8px; border-radius:10px; font-size:12px;">${sniffedRequests.length}</span>`;
+
+  const netDesc = document.createElement('p');
+  netDesc.textContent = 'AI 분석의 근거가 된 통신 목록입니다. 클릭하여 상세 데이터를 확인하세요.';
+  netDesc.style.cssText = 'margin:0; font-size:12px; color:#94a3b8; line-height:1.4;';
+
+  const netList = document.createElement('div');
+  netList.style.cssText = 'display:flex; flex-direction:column; gap:10px;';
+
+  sniffedRequests.forEach(req => {
+    const item = document.createElement('div');
+    item.style.cssText = 'background:#f8fafc; padding:12px; border-radius:10px; font-size:12px; cursor:pointer; border:1px solid #f1f5f9; transition:all 0.2s; position:relative;';
+    item.onmouseover = () => {
+      item.style.background = 'white';
+      item.style.borderColor = typeColor;
+      item.style.boxShadow = '0 4px 12px rgba(0,0,0,0.05)';
+    };
+    item.onmouseout = () => {
+      item.style.background = '#f8fafc';
+      item.style.borderColor = '#f1f5f9';
+      item.style.boxShadow = 'none';
+    };
+    item.onclick = () => showResponsePreview(req);
+
+    const isComplete = !!req.response;
+    const statusText = isComplete ? 'SUCCESS' : 'PENDING';
+    const statusColor = isComplete ? '#10b981' : '#f59e0b';
+
+    item.innerHTML = `
+      <div style="display:flex; justify-content:space-between; margin-bottom:6px; align-items:center;">
+        <span style="font-weight:800; color:${typeColor}; font-family:monospace; padding:2px 6px; background:${typeColor}10; border-radius:4px;">${req.method}</span>
+        <span style="font-size:10px; font-weight:bold; color:${statusColor}; background:${statusColor}15; padding:2px 6px; border-radius:4px;">${statusText}</span>
+      </div>
+      <div style="color:#1e293b; font-weight:500; word-break:break-all; line-height:1.3; margin-bottom:8px;">${req.url.split('/').pop()?.split('?')[0] || req.url}</div>
+      <div style="font-size:11px; color:#94a3b8; display:flex; align-items:center; gap:4px;">
+        🔍 Click to view Body
+      </div>
+    `;
+    netList.appendChild(item);
+  });
+
+  rightCol.appendChild(netTitle);
+  rightCol.appendChild(netDesc);
+  rightCol.appendChild(netList);
+
+  content.appendChild(leftCol);
+  content.appendChild(rightCol);
   modal.appendChild(content);
+
   document.body.appendChild(modal);
+  
+  // Cleanup overlays if any
+  const oldLog = document.getElementById('web-scraper-sniff-log');
+  const oldTimer = document.getElementById('web-scraper-timer-wrap');
+  if (oldLog) oldLog.style.display = 'none';
+  if (oldTimer) oldTimer.style.display = 'none';
 };
 
 const removeOverlay = () => {
