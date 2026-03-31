@@ -269,11 +269,21 @@ function mainWorldSniffer() {
       else if (args[1].body instanceof URLSearchParams) { body = args[1].body.toString(); }
     }
     
-    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-      detail: { type: 'fetch', url: url, method: method, body: body }
-    }));
+    const response = await originalFetch.apply(this, args);
     
-    return originalFetch.apply(this, args);
+    try {
+      const clonedResponse = response.clone();
+      const bodyText = await clonedResponse.text();
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { type: 'fetch', url: url, method: method, body: body, response: bodyText }
+      }));
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { type: 'fetch', url: url, method: method, body: body }
+      }));
+    }
+    
+    return response;
   };
 
   const originalXhrOpen = XMLHttpRequest.prototype.open;
@@ -287,9 +297,19 @@ function mainWorldSniffer() {
     let parsedBody = '';
     if (typeof body === 'string') { parsedBody = body; } 
     else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
-    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-      detail: { type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody }
-    }));
+
+    this.addEventListener('load', function() {
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { 
+          type: 'xhr', 
+          url: (this as any)._url, 
+          method: (this as any)._method, 
+          body: parsedBody, 
+          response: (this as any).responseText 
+        }
+      }));
+    });
+
     return originalXhrSend.apply(this, [body]);
   };
   console.log("🚀 [WEB SCRAPER] Network Sniffer Injection Success (via Background World-Injection)");

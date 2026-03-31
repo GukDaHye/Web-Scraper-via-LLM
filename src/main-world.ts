@@ -18,11 +18,22 @@
       else if (args[1].body instanceof FormData) { /* simplified */ }
     }
     
-    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-      detail: { type: 'fetch', url, method, body }
-    }));
+    const response = await originalFetch.apply(this, args);
     
-    return originalFetch.apply(this, args);
+    // Capture response body for the sniffer
+    try {
+      const clonedResponse = response.clone();
+      const bodyText = await clonedResponse.text();
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { type: 'fetch', url, method, body, response: bodyText }
+      }));
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { type: 'fetch', url, method, body }
+      }));
+    }
+    
+    return response;
   };
 
   const originalXhrOpen = XMLHttpRequest.prototype.open;
@@ -36,9 +47,19 @@
     let parsedBody = '';
     if (typeof body === 'string') { parsedBody = body; } 
     else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
-    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-      detail: { type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody }
-    }));
+
+    this.addEventListener('load', function() {
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { 
+          type: 'xhr', 
+          url: (this as any)._url, 
+          method: (this as any)._method, 
+          body: parsedBody, 
+          response: (this as any).responseText 
+        }
+      }));
+    });
+
     return originalXhrSend.apply(this, [body]);
   };
 })();

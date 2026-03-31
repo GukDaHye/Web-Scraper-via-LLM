@@ -21,16 +21,43 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
   const ignoreWords = ['analytics', 'pixel', 'log', 'tracking', 'css', 'js', 'png', 'jpg'];
   if (ignoreWords.some(w => url.includes(w))) return;
 
-  sniffedRequests.push(data);
+  // Update or push to sniffedRequests
+  const existingIdx = sniffedRequests.findIndex(r => r.url === data.url && r.method === data.method && r.body === data.body);
+  if (existingIdx > -1) {
+    sniffedRequests[existingIdx].response = data.response;
+  } else {
+    sniffedRequests.push(data);
+  }
 
   // Update real-time UI
   const logContainer = document.getElementById('web-scraper-sniff-log');
   if (logContainer) {
     logContainer.style.display = 'block';
-    const item = document.createElement('div');
-    item.className = 'web-scraper-sniffer-item';
-    item.textContent = `[${data.type.toUpperCase()}] ${data.method} ${data.url.split('?')[0]}`;
-    logContainer.prepend(item);
+    
+    // Check if item already exists in UI to avoid duplicates, or just prepend if new
+    const itemId = `sniff-item-${btoa(data.url).substring(0, 16)}`;
+    let item = document.getElementById(itemId);
+    
+    if (!item) {
+      item = document.createElement('div');
+      item.id = itemId;
+      item.className = 'web-scraper-sniffer-item';
+      item.style.cursor = 'pointer';
+      item.style.display = 'flex';
+      item.style.alignItems = 'center';
+      item.style.gap = '6px';
+      item.onmouseover = () => item!.style.background = 'rgba(255,255,255,0.1)';
+      item.onmouseout = () => item!.style.background = 'transparent';
+      item.onclick = () => showResponsePreview(data);
+      logContainer.prepend(item);
+    }
+    
+    item.innerHTML = `
+      <span style="color:#38bdf8;">🔍</span>
+      <div style="overflow:hidden; text-overflow:ellipsis;">
+        [${data.type.toUpperCase()}] ${data.method} ${data.url.split('/').pop()?.split('?')[0] || data.url}
+      </div>
+    `;
     
     const countEl = document.getElementById('web-scraper-sniff-count');
     if (countEl) countEl.textContent = sniffedRequests.length.toString();
@@ -140,6 +167,77 @@ const showToast = (message: string, autoCloseMs = 0) => {
       }
     }, autoCloseMs);
   }
+};
+
+const showResponsePreview = (requestData: any) => {
+  if (document.getElementById('web-scraper-response-modal')) {
+    document.getElementById('web-scraper-response-modal')?.remove();
+  }
+  
+  const modal = document.createElement('div');
+  modal.id = 'web-scraper-response-modal';
+  modal.style.cssText = `
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center;
+    z-index: 1000000; font-family: -apple-system, system-ui, sans-serif;
+  `;
+
+  const content = document.createElement('div');
+  content.style.cssText = `
+    background: #1e293b; color: #e2e8f0; padding: 24px; border-radius: 12px;
+    width: 85%; max-width: 800px; max-height: 85%; overflow: hidden; display: flex; flex-direction: column; gap: 16px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); border: 1px solid #334155;
+  `;
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; border-bottom: 2px solid #334155; padding-bottom: 12px;';
+  
+  const title = document.createElement('div');
+  title.style.cssText = 'font-weight: bold; font-size: 16px; color: #38bdf8; word-break: break-all; padding-right: 20px;';
+  title.textContent = `${requestData.method} ${requestData.url}`;
+
+  const closeBtnTop = document.createElement('button');
+  closeBtnTop.innerHTML = '&times;';
+  closeBtnTop.style.cssText = 'background:none; border:none; color:#9ca3af; font-size:24px; cursor:pointer; line-height:1;';
+  closeBtnTop.onclick = () => modal.remove();
+
+  header.appendChild(title);
+  header.appendChild(closeBtnTop);
+
+  const scrollArea = document.createElement('div');
+  scrollArea.style.cssText = 'overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; padding-right: 8px;';
+
+  const bodySection = document.createElement('div');
+  bodySection.innerHTML = `<div style="font-weight:bold; margin-bottom:6px; font-size:13px; color:#9ca3af;">Request Body</div>
+    <pre style="background:#0f172a; padding:12px; border-radius:6px; margin:0; font-family:monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; border:1px solid #1e293b;">${requestData.body || '(Empty)'}</pre>`;
+  
+  const resSection = document.createElement('div');
+  let formattedResponse = requestData.response || 'No response captured or request still pending...';
+  try {
+    const json = JSON.parse(formattedResponse);
+    formattedResponse = JSON.stringify(json, null, 2);
+  } catch (e) {}
+  resSection.innerHTML = `<div style="font-weight:bold; margin-bottom:6px; font-size:13px; color:#9ca3af;">Response Body (Server Answer)</div>
+    <pre style="background:#0f172a; padding:12px; border-radius:6px; margin:0; font-family:monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; color:#34d399; border:1px solid #1e293b;">${formattedResponse}</pre>`;
+
+  scrollArea.appendChild(bodySection);
+  scrollArea.appendChild(resSection);
+
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex; justify-content:flex-end; padding-top: 12px; border-top: 1px solid #334155;';
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Close Preview';
+  closeBtn.style.cssText = 'padding: 8px 16px; background: #334155; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 14px;';
+  closeBtn.onclick = () => modal.remove();
+
+  footer.appendChild(closeBtn);
+
+  content.appendChild(header);
+  content.appendChild(scrollArea);
+  content.appendChild(footer);
+  modal.appendChild(content);
+  document.body.appendChild(modal);
 };
 
 // Create a small UI overlay to show what we are picking
