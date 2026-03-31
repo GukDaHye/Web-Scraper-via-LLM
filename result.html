@@ -55,9 +55,10 @@
   </head>
   <body>
     <h1>Extraction Results</h1>
-    <div style="margin-bottom: 24px;">
+    <div style="margin-bottom: 24px; display: flex; gap: 10px; flex-wrap: wrap;">
       <button id="downloadJsonBtn">Download JSON</button>
       <button id="downloadCsvBtn">Download CSV</button>
+      <button id="generatePythonBtn" style="background-color: #3b82f6;">Generate Python Script (Local)</button>
     </div>
     <div id="loadingMsg">Loading results from storage...</div>
     <pre id="outputView" style="display: none;"></pre>

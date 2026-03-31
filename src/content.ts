@@ -4,62 +4,13 @@ import TurndownService from 'turndown';
 let isPicking = false;
 let currentTarget: 'listSelector' | 'loadMoreSelector' | 'detailSelector' | 'apiSniffer' | null = null;
 let hoveredElement: HTMLElement | null = null;
+const turndownService = new TurndownService({ headingStyle: 'atx' });
 
 let isSniffingActive = false;
 let sniffedRequests: any[] = [];
 
-const injectNetworkSniffer = () => {
-  if (document.getElementById('web-scraper-network-sniffer')) return;
-  const script = document.createElement('script');
-  script.id = 'web-scraper-network-sniffer';
-  script.textContent = `
-    (function() {
-      const originalFetch = window.fetch;
-      window.fetch = async function(...args) {
-        let url = '';
-        let body = '';
-        const req = args[0];
-        if (typeof req === 'string') { url = req; } 
-        else if (req instanceof Request) { url = req.url; }
-        
-        let method = 'GET';
-        if (args[1] && args[1].method) { method = args[1].method; } 
-        else if (req instanceof Request) { method = req.method; }
+// injectNetworkSniffer is now handled by src/main-world.ts via world: MAIN in manifest.json
 
-        if (args[1] && args[1].body) {
-          if (typeof args[1].body === 'string') { body = args[1].body; } 
-          else if (args[1].body instanceof URLSearchParams) { body = args[1].body.toString(); }
-          else if (args[1].body instanceof FormData) { /* simplified */ }
-        }
-        
-        window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-          detail: { type: 'fetch', url, method, body }
-        }));
-        
-        return originalFetch.apply(this, args);
-      };
-
-      const originalXhrOpen = XMLHttpRequest.prototype.open;
-      const originalXhrSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function(method, url, ...args) {
-        this._method = method; this._url = url;
-        return originalXhrOpen.apply(this, [method, url, ...args]);
-      };
-      XMLHttpRequest.prototype.send = function(body) {
-        let parsedBody = '';
-        if (typeof body === 'string') { parsedBody = body; } 
-        else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
-        window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
-          detail: { type: 'xhr', url: this._url, method: this._method, body: parsedBody }
-        }));
-        return originalXhrSend.apply(this, [body]);
-      };
-    })();
-  `;
-  document.documentElement.appendChild(script);
-};
-
-injectNetworkSniffer();
 
 window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
   if (!isSniffingActive) return;
@@ -72,9 +23,23 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
 
   sniffedRequests.push(data);
 });
-let activeOverlay: HTMLDivElement | null = null;
+// Specialized parser for Samsung Global SSR (pdd32 structure)
+const samsungSpecificParser = (root: HTMLElement): string => {
+  const specItems = root.querySelectorAll('.pdd32-product-spec__detail-item');
+  if (specItems.length === 0) return "";
 
-const turndownService = new TurndownService({ headingStyle: 'atx' });
+  let markdown = "\n\n| Attribute | Value |\n| --- | --- |\n";
+  specItems.forEach(item => {
+    const title = item.querySelector('.pdd32-product-spec__detail-title')?.textContent?.trim() || "";
+    const text = item.querySelector('.pdd32-product-spec__detail-text')?.textContent?.trim() || "";
+    if (title && text) {
+      markdown += `| ${title} | ${text} |\n`;
+    }
+  });
+  return markdown;
+};
+
+let activeOverlay: HTMLDivElement | null = null;
 
 // Inject CSS for highlighting and toasts explicitly
 const injectStyles = () => {
@@ -167,6 +132,100 @@ const showOverlay = (target: string) => {
   document.getElementById('web-scraper-cancel-picker')?.addEventListener('click', stopPicking);
 };
 
+const showRecipeModal = (ruleJson: any) => {
+  const modal = document.createElement('div');
+  modal.id = 'web-scraper-recipe-modal';
+  modal.style.cssText = `
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center;
+    z-index: 999999; font-family: -apple-system, system-ui, sans-serif;
+  `;
+
+  const content = document.createElement('div');
+  content.style.cssText = `
+    background: white; padding: 24px; border-radius: 12px; max-width: 550px; width: 90%;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 16px;
+  `;
+
+  const typeColor = ruleJson.renderingType === 'CSR' ? '#3b82f6' : '#10b981';
+
+  // Title Row
+  const titleRow = document.createElement('div');
+  titleRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
+  
+  const h2 = document.createElement('h2');
+  h2.style.cssText = 'margin:0; font-size:1.4rem; color:#111;';
+  h2.textContent = '🔍 글로벌 사이트 판독 리포트';
+  
+  const badge = document.createElement('span');
+  badge.style.cssText = `background:${typeColor}; color:white; padding:4px 10px; border-radius:20px; font-size:12px; font-weight:bold;`;
+  badge.textContent = `${ruleJson.renderingType} 방식`;
+  
+  titleRow.appendChild(h2);
+  titleRow.appendChild(badge);
+  content.appendChild(titleRow);
+
+  // Diagnosis Box
+  const diagBox = document.createElement('div');
+  diagBox.style.cssText = `background:#f8fafc; padding:15px; border-radius:8px; border-left:4px solid ${typeColor};`;
+  
+  const diagTitle = document.createElement('strong');
+  diagTitle.style.cssText = 'display:block; margin-bottom:5px; color:#1e293b;';
+  diagTitle.textContent = '🤖 AI 판독 근거';
+  
+  const diagText = document.createElement('p');
+  diagText.style.cssText = 'margin:0; font-size:14px; color:#475569; line-height:1.5;';
+  diagText.textContent = ruleJson.diagnosis_ko || "판독 근거를 생성하지 못했습니다.";
+  
+  diagBox.appendChild(diagTitle);
+  diagBox.appendChild(diagText);
+  content.appendChild(diagBox);
+
+  // Rule Box
+  const ruleBox = document.createElement('div');
+  ruleBox.style.cssText = 'font-size:13px; color:#64748b;';
+  
+  const ruleTitle = document.createElement('strong');
+  ruleTitle.style.cssText = 'display:block; margin-bottom:5px;';
+  ruleTitle.textContent = '📋 추출 규칙 상세';
+  
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'background:#1e293b; color:#e2e8f0; padding:10px; border-radius:6px; overflow:auto; max-height:150px; margin:0;';
+  pre.textContent = JSON.stringify(ruleJson, null, 2);
+  
+  ruleBox.appendChild(ruleTitle);
+  ruleBox.appendChild(pre);
+  content.appendChild(ruleBox);
+
+  // Buttons Row
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex; justify-content:flex-end; gap:10px; margin-top:10px;';
+  
+  const saveBtn = document.createElement('button');
+  saveBtn.style.cssText = 'padding:10px 20px; background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold;';
+  saveBtn.textContent = '✅ 확인 및 저장';
+  saveBtn.onclick = () => {
+     chrome.storage.sync.set({ apiExtractionRule: JSON.stringify(ruleJson) }, () => {
+        showToast("🎯 추출 규칙이 성공적으로 저장되었습니다! 이제 추출을 시작하세요.", 4000);
+        modal.remove();
+     });
+  };
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.style.cssText = 'padding:10px 20px; background:#f1f5f9; color:#475569; border:none; border-radius:6px; cursor:pointer;';
+  closeBtn.textContent = '닫기';
+  closeBtn.onclick = () => {
+     modal.remove();
+  };
+  
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(closeBtn);
+  content.appendChild(btnRow);
+
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+};
+
 const removeOverlay = () => {
   if (activeOverlay) {
     activeOverlay.remove();
@@ -255,42 +314,58 @@ const handleClick = (e: MouseEvent) => {
   if (activeOverlay && activeOverlay.contains(target)) return;
 
   if (currentTarget === 'apiSniffer') {
-    chrome.storage.sync.get(['listSelector'], (res) => {
+    // 1. Immediately activate sniffing so the first click's request is caught
+    isSniffingActive = true;
+    sniffedRequests = [];
+    
+    showToast("🛰️ [WEB SCRAPER] 발견 모드 가동 중... 클릭 직후의 통신을 낚아챕니다!", 3000);
+
+    // Get context asynchronously but don't block the click from reaching the page
+    chrome.storage.sync.get(['listSelector', 'detailSelector'], (res) => {
         if (!res.listSelector) {
            alert("List Selector를 먼저 설정해주세요.");
            stopPicking();
            return;
         }
+        
         const parentItem = target.closest(res.listSelector) as HTMLElement;
-        if (!parentItem) {
-           alert("클릭한 버튼이 상품 카드의 내부(List Selector 영역)에 없습니다!");
-           stopPicking();
-           return;
+        const beforeHtml = parentItem ? parentItem.outerHTML : "";
+        const detailSelectorHtml = res.detailSelector ? (document.querySelector(res.detailSelector) as HTMLElement)?.outerHTML || "" : "";
+        
+        let targetAreaHtml = "";
+        const anchor = target.closest('a');
+        if (anchor && anchor.hash && anchor.hash.startsWith('#')) {
+            const targetId = anchor.hash.substring(1);
+            const targetEl = document.getElementById(targetId);
+            if (targetEl) targetAreaHtml = targetEl.outerHTML;
         }
-        
-        isSniffingActive = true;
-        sniffedRequests = [];
-        showToast("🔍 버튼 클릭 통과. 2초 동안 통신을 캡처합니다...");
-        
+
+        // Wait for 2.5 seconds to capture all triggered requests
         setTimeout(() => {
            isSniffingActive = false;
            stopPicking();
-           if (sniffedRequests.length === 0) {
-              alert("2초 동안 감지된 유효한 API 통신이 없습니다.");
-              return;
-           }
            
-           const lastReq = sniffedRequests[sniffedRequests.length - 1]; // 가장 유력
-           showToast("🤖 통신 캐치완료! 제미나이가 매핑 규칙을 탐색합니다...", 60000); // 1 minute toast until done
+           const afterHtml = parentItem ? parentItem.outerHTML : "";
+           const beforeMarkdown = beforeHtml ? turndownService.turndown(beforeHtml) : "";
+           const afterMarkdown = afterHtml ? turndownService.turndown(afterHtml) : "";
+           const detailHintMarkdown = detailSelectorHtml ? turndownService.turndown(detailSelectorHtml) : "";
+           const targetAreaMarkdown = targetAreaHtml ? turndownService.turndown(targetAreaHtml) : "";
+
+           showToast("🤖 통신 내역 수집 완료! 제미나이가 분석 중입니다...", 60000);
            
            chrome.runtime.sendMessage({
                action: 'analyze_api_rule',
-               requestPayload: lastReq,
-               cardHtml: parentItem.outerHTML
+               requestPayloads: sniffedRequests, 
+               beforeHtml: beforeMarkdown,
+               afterHtml: afterMarkdown,
+               detailHintHtml: detailHintMarkdown,
+               targetAreaHtml: targetAreaMarkdown
            });
-        }, 2000);
+        }, 2500);
     });
-    return; // allow the click to execute!
+    
+    // IMPORTANT: DO NOT call e.preventDefault() here! 
+    return; 
   }
 
   e.preventDefault();
@@ -360,6 +435,13 @@ const performExtraction = async () => {
   showToast('🛠️ Extracting item data from page...');
   await pause(1000);
 
+  // 💡 [NEW] Save context for Python script generation early to avoid context errors
+  chrome.storage.sync.set({ 
+    lastScrapedUrl: window.location.href,
+    listSelector: result.listSelector,
+    detailSelector: result.detailSelector
+  });
+
   const listItems = document.querySelectorAll(result.listSelector);
   if (listItems.length === 0) {
     showToast('⚠️ No items found using the specified list selector.', 5000);
@@ -384,93 +466,179 @@ const performExtraction = async () => {
       const baseMarkdown = turndownService.turndown(htmlContent);
       let combinedMarkdown = baseMarkdown;
 
-      // --- Deep Fetch API Logic ---
+      // --- Deep Fetch API/SSR Logic ---
       const { apiExtractionRule } = await new Promise<any>(res => chrome.storage.sync.get(['apiExtractionRule'], res));
       
       let goodsId = '';
-      let goodsNm = '';
       let customApiUrl = '';
       let customBodyParamsStr = '';
+      let renderingType = 'SAMSUNG_LEGACY';
       
       if (apiExtractionRule) {
         try {
           const rule = JSON.parse(apiExtractionRule);
-          const p = rule.urlParams[0];
-          const el = item.matches(p.domSelector) ? item : item.querySelector(p.domSelector);
-          if (el) {
-            goodsId = p.domAttribute === 'textContent' ? el.textContent || '' : el.getAttribute(p.domAttribute) || '';
-          }
-          customApiUrl = rule.apiUrl;
+          renderingType = rule.renderingType || 'CSR';
           
-          const params = new URLSearchParams(rule.staticBodyParams || {});
-          params.append(p.targetParam, goodsId);
-          customBodyParamsStr = params.toString();
+          if (renderingType === 'CSR') {
+            const p = rule.urlParams[0];
+            const el = item.matches(p.domSelector) ? item : item.querySelector(p.domSelector);
+            if (el) {
+              goodsId = p.domAttribute === 'textContent' ? el.textContent || '' : el.getAttribute(p.domAttribute) || '';
+            }
+            customApiUrl = rule.apiUrl;
+            
+            const params = new URLSearchParams(rule.staticBodyParams || {});
+            params.append(p.targetParam, goodsId);
+            customBodyParamsStr = params.toString();
+          } else if (renderingType === 'SSR') {
+            const selectorToUse = result.detailSelector || rule.specDomSelector;
+            
+            if (selectorToUse) {
+              let specEl = item.querySelector(selectorToUse) as HTMLElement;
+              if (!specEl && selectorToUse.startsWith('#')) {
+                  specEl = document.querySelector(selectorToUse) as HTMLElement;
+              }
+              
+              if (specEl) {
+                // --- Auto Click Logic for Hidden SSR Content ---
+                if (rule.requiresClick) {
+                  const expandBtn = specEl.querySelector('button, .cta, a[role="button"], [data-expand-text]') as HTMLElement;
+                  if (expandBtn) {
+                    console.log("🖱️ [WEB SCRAPER] Auto-clicking expand button for SSR content...");
+                    expandBtn.click();
+                    await pause(1000); // Increased wait for slower global regions
+                  }
+                }
+
+                // 🌟 Harden: Use Samsung Precision Parser first, then fallback to Turndown
+                const samsungSpecMarkdown = samsungSpecificParser(specEl);
+                if (samsungSpecMarkdown) {
+                  combinedMarkdown += `\n\n### Specialized Spec Capture (Samsung-Specific):\n${samsungSpecMarkdown}`;
+                } else {
+                  const specMarkdown = turndownService.turndown(specEl.outerHTML);
+                  combinedMarkdown += `\n\n### SSR Detailed Specs (Source: ${selectorToUse}):\n${specMarkdown}`;
+                }
+                showToast(`🔍 SSR 스펙 데이터 캡처 성공! (${i + 1})`);
+              }
+            }
+          }
         } catch (e) {
           console.error("Rule parse error", e);
         }
       }
 
-      if (!goodsId) {
-        // Fallback to Samsung hardcoded logic
-        goodsId = item.getAttribute('data-goods-id') || '';
-        goodsNm = item.getAttribute('data-goods-nm') || '';
-
-        if (!goodsId) {
-          const checkboxWrap = item.querySelector('[data-goods-id]');
-          if (checkboxWrap) {
-            goodsId = checkboxWrap.getAttribute('data-goods-id') || '';
-            goodsNm = checkboxWrap.getAttribute('data-goods-nm') || '';
-          }
-        }
+      // --- Specialized Samsung Korea CSR Fallback (Multi-ID Scanner) ---
+      if (renderingType === 'SAMSUNG_LEGACY' || (renderingType === 'CSR' && window.location.host.includes('samsung.com/sec'))) {
+        const idElements = item.querySelectorAll('[data-goods-id]');
+        const uniqueIds = new Set<string>();
+        const idData: Array<{id: string, nm: string, tp: string}> = [];
         
-        customApiUrl = 'https://www.samsung.com/sec/xhr/goods/getGoodsSpecList';
-        customBodyParamsStr = new URLSearchParams({
-              goodsId: goodsId,
-              goodsTpCd: '10',
-              goodsNm: goodsNm,
-              adminYn: '',
-              taskId: '',
-              taskDtlNo: ''
-            }).toString();
+        idElements.forEach(el => {
+          const gid = el.getAttribute('data-goods-id');
+          if (gid && !uniqueIds.has(gid)) {
+            uniqueIds.add(gid);
+            idData.push({
+              id: gid,
+              nm: el.getAttribute('data-goods-nm') || '',
+              tp: el.getAttribute('data-goods-tp-cd') || '10'
+            });
+          }
+        });
+
+        // Fallback for current item if no children have IDs
+        if (idData.length === 0) {
+          const gid = item.getAttribute('data-goods-id');
+          if (gid) idData.push({ id: gid, nm: item.getAttribute('data-goods-nm') || '', tp: item.getAttribute('data-goods-tp-cd') || '10' });
+        }
+
+        if (idData.length > 0) {
+          showToast(`📡 [SAMSUNG KOREA] Found ${idData.length} product IDs. Fetching all...`);
+          
+          const fetchPromises = idData.map(async (data) => {
+            const apiUrl = data.nm ? 'https://www.samsung.com/sec/xhr/goods/getGoodsSpecList' : 'https://www.samsung.com/sec/xhr/goods/goodsSpec';
+            const params = new URLSearchParams();
+            params.append('goodsId', data.id);
+            params.append('goodsTpCd', data.tp);
+            if (data.nm) params.append('goodsNm', data.nm);
+            params.append('adminYn', '');
+            
+            try {
+              const res = await fetch(apiUrl, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                  'x-requested-with': 'XMLHttpRequest'
+                },
+                body: params.toString()
+              });
+              if (res.ok) {
+                const text = await res.text();
+                // Basic cleanup and parsing
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(text, 'text/html');
+                const samsungMarkdown = samsungSpecificParser(doc.body);
+                return `\n\n--- [ PRODUCT: ${data.id} (${data.nm || 'Unknown'}) ] ---\n${samsungMarkdown || turndownService.turndown(doc.body.outerHTML)}`;
+              }
+            } catch (err) {
+              console.error('Fetch error for ID', data.id, err);
+            }
+            return '';
+          });
+
+          const results = await Promise.all(fetchPromises);
+          combinedMarkdown += results.filter(r => r).join('\n');
+          renderingType = 'CSR_COMPLETED'; // Stop generic fetch from running
+        }
       }
-      
-      if (goodsId) {
-        showToast(`⏳ 딥-페치 스펙 불러오는 중... (${i + 1}/${processList.length})`);
+    
+      if (renderingType === 'CSR' && goodsId && customApiUrl) {
+        showToast(`⏳ 딥-페치(CSR) 스펙 불러오는 중... (${i + 1}/${processList.length})`);
         try {
           const specRes = await fetch(customApiUrl, {
             method: 'POST',
             headers: {
-              'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'
+              'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'x-requested-with': 'XMLHttpRequest'
             },
             body: customBodyParamsStr
           });
 
           if (specRes.ok) {
-            const specHtml = await specRes.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(specHtml, 'text/html');
-            // If it's pure JSON or generic HTML without .spec-table, grab body directly
-            const specTable = doc.querySelector('.spec-table') || doc.body;
-            if (specTable) {
-              const specMarkdown = turndownService.turndown(specTable.outerHTML);
-              combinedMarkdown += `\n\n### Detailed Specs (Deep Fetch):\n${specMarkdown}`;
+            const specDataBlob = await specRes.text();
+            let specMarkdown = "";
+            
+            // Try parsing as JSON first, fallback to HTML
+            try {
+              const specJson = JSON.parse(specDataBlob);
+              specMarkdown = "\n\n### API Specs (JSON):\n" + JSON.stringify(specJson, null, 2);
+            } catch {
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(specDataBlob, 'text/html');
+              // 🌟 Harden: Also use Samsung Specific Parser on API-returned HTML
+              const samsungApiMarkdown = samsungSpecificParser(doc.body);
+              if (samsungApiMarkdown) {
+                specMarkdown = "\n\n### Specialized API Spec Capture:\n" + samsungApiMarkdown;
+              } else {
+                const specTable = doc.querySelector('.spec-table, table, .pdd32-product-spec') || doc.body;
+                specMarkdown = "\n\n### API Detailed Specs (HTML View):\n" + turndownService.turndown(specTable.outerHTML);
+              }
             }
+            combinedMarkdown += specMarkdown;
           }
         } catch (fetchErr) {
           console.error('Failed to deep fetch specs for', goodsId, fetchErr);
         }
-        await pause(200); // polite delay
+        await pause(300);
       }
 
       extractedData.push(combinedMarkdown);
     } catch (e) {
-      console.error('Turndown error', e);
+      console.error('Extraction item error', e);
       extractedData.push(item.textContent || '');
     }
   }
 
-  // 3. Send back to Background Script to process with LLM
-  showToast(`🤖 Sending ${extractedData.length} items to Gemini AI... This can take 10-30 seconds.`);
+  showToast(`🤖 Sending ${extractedData.length} items to Gemini AI for final mapping...`);
 
   chrome.runtime.sendMessage({
     action: 'process_with_llm',
@@ -490,12 +658,24 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     sendResponse({ success: true, message: 'Extraction running in background' });
   } else if (request.action === 'extraction_complete') {
     showToast('✅ Extraction complete!', 3000);
+    sendResponse({ success: true });
   } else if (request.action === 'sniffing_rule_saved') {
-    showToast(`🎯 Rule Saved! ${request.ruleJson.urlParams[0].targetParam} => ${request.ruleJson.urlParams[0].domAttribute}`, 4000);
+    // 💡 Detailed console logging for diagnostics
+    console.group("🔍 [WEB SCRAPER] AI 글로벌 사이트 판독 결과");
+    console.log("판독 방식:", request.ruleJson.renderingType);
+    console.log("판독 근거:", request.ruleJson.diagnosis_ko);
+    console.log("추출 규칙:", request.ruleJson);
+    console.groupEnd();
+    
+    showToast(`🎯 Rule Generated! (Check Console for details)`, 4000);
+    showRecipeModal(request.ruleJson);
+    sendResponse({ success: true });
   } else if (request.action === 'sniffing_rule_error') {
     showToast(`❌ AI Error: ${request.message}`, 8000);
+    sendResponse({ success: true });
   } else if (request.action === 'extraction_error') {
     showToast(`❌ Error: ${request.message}`, 8000);
+    sendResponse({ success: true });
   }
   return true;
 });
