@@ -22,6 +22,19 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
   if (ignoreWords.some(w => url.includes(w))) return;
 
   sniffedRequests.push(data);
+
+  // Update real-time UI
+  const logContainer = document.getElementById('web-scraper-sniff-log');
+  if (logContainer) {
+    logContainer.style.display = 'block';
+    const item = document.createElement('div');
+    item.className = 'web-scraper-sniffer-item';
+    item.textContent = `[${data.type.toUpperCase()}] ${data.method} ${data.url.split('?')[0]}`;
+    logContainer.prepend(item);
+    
+    const countEl = document.getElementById('web-scraper-sniff-count');
+    if (countEl) countEl.textContent = sniffedRequests.length.toString();
+  }
 });
 // Specialized parser for Samsung Global SSR (pdd32 structure)
 const samsungSpecificParser = (root: HTMLElement): string => {
@@ -71,6 +84,39 @@ const injectStyles = () => {
       align-items: center;
       gap: 12px;
     }
+    .web-scraper-sniffer-log {
+      max-height: 120px;
+      overflow-y: auto;
+      margin-top: 10px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 4px;
+      padding: 6px;
+      font-family: 'Menlo', 'Monaco', monospace;
+      font-size: 11px;
+      display: none;
+    }
+    .web-scraper-sniffer-item {
+      color: #34d399; /* emerald-400 */
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      padding-bottom: 2px;
+    }
+    .web-scraper-timer-container {
+      height: 6px;
+      background: #374151;
+      border-radius: 3px;
+      margin-top: 10px;
+      overflow: hidden;
+      display: none;
+    }
+    .web-scraper-timer-progress {
+      height: 100%;
+      background: #3b82f6;
+      width: 0%;
+    }
   `;
   document.head.appendChild(style);
 };
@@ -113,8 +159,9 @@ const showOverlay = (target: string) => {
     font-size: 14px;
     box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    width: 280px;
+    gap: 0;
   `;
 
   let label = 'Element';
@@ -122,9 +169,23 @@ const showOverlay = (target: string) => {
   if (target === 'loadMoreSelector') label = 'Load More (더보기) Button';
   if (target === 'detailSelector') label = 'Detail Element';
   if (target === 'apiSniffer') label = 'API Sniffer (스펙 버튼 클릭)';
+  
   activeOverlay.innerHTML = `
-    <span>Picking <strong>${label}</strong>. Click an element to select.</span>
-    <button id="web-scraper-cancel-picker" style="background:#ef4444; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">Cancel</button>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span>Picking <strong>${label}</strong></span>
+      <button id="web-scraper-cancel-picker" style="background:#ef4444; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px;">Cancel</button>
+    </div>
+    <div style="font-size:12px; color:#9ca3af; margin-bottom:4px;">Click an element to select.</div>
+    <div id="web-scraper-sniff-status" style="display:${target === 'apiSniffer' ? 'block' : 'none'}; margin-top:8px; border-top:1px solid #374151; padding-top:8px;">
+       <div style="display:flex; justify-content:space-between; font-weight:bold;">
+         <span>Captured Requests</span>
+         <span id="web-scraper-sniff-count" style="color:#10b981;">0</span>
+       </div>
+       <div class="web-scraper-timer-container" id="web-scraper-timer-wrap">
+         <div class="web-scraper-timer-progress" id="web-scraper-timer-bar"></div>
+       </div>
+       <div id="web-scraper-sniff-log" class="web-scraper-sniffer-log"></div>
+    </div>
   `;
 
   document.body.appendChild(activeOverlay);
@@ -319,6 +380,30 @@ const handleClick = (e: MouseEvent) => {
     sniffedRequests = [];
     
     showToast("🛰️ [WEB SCRAPER] 발견 모드 가동 중... 클릭 직후의 통신을 낚아챕니다!", 3000);
+
+    // Reset UI for new capture
+    const timerWrap = document.getElementById('web-scraper-timer-wrap');
+    const timerBar = document.getElementById('web-scraper-timer-bar');
+    const logContainer = document.getElementById('web-scraper-sniff-log');
+    if (timerWrap) timerWrap.style.display = 'block';
+    if (logContainer) {
+        logContainer.innerHTML = '';
+        logContainer.style.display = 'none';
+    }
+
+    let startTime = Date.now();
+    const duration = 2500;
+    
+    const updateTimer = () => {
+        if (!isSniffingActive) return;
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min((elapsed / duration) * 100, 100);
+        if (timerBar) timerBar.style.width = `${progress}%`;
+        if (progress < 100) {
+            requestAnimationFrame(updateTimer);
+        }
+    };
+    requestAnimationFrame(updateTimer);
 
     // Get context asynchronously but don't block the click from reaching the page
     chrome.storage.sync.get(['listSelector', 'detailSelector'], (res) => {
