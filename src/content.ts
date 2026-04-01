@@ -70,20 +70,87 @@ window.addEventListener('__WEB_SCRAPER_NETWORK_HOOK', (e: Event) => {
     if (countEl) countEl.textContent = sniffedRequests.length.toString();
   }
 });
-// Specialized parser for Samsung Global SSR (pdd32 structure)
+// Multi-pattern parser for Samsung spec HTML
+// Handles: Global SSR (pdd32), Korea CSR (getGoodsSpecList) table/DL/list structures
 const samsungSpecificParser = (root: HTMLElement): string => {
-  const specItems = root.querySelectorAll('.pdd32-product-spec__detail-item');
-  if (specItems.length === 0) return "";
+  const buildTable = (rows: Array<[string, string]>): string => {
+    if (rows.length === 0) return "";
+    let md = "\n\n| Attribute | Value |\n| --- | --- |\n";
+    rows.forEach(([k, v]) => { md += `| ${k} | ${v} |\n`; });
+    return md;
+  };
 
-  let markdown = "\n\n| Attribute | Value |\n| --- | --- |\n";
-  specItems.forEach(item => {
-    const title = item.querySelector('.pdd32-product-spec__detail-title')?.textContent?.trim() || "";
-    const text = item.querySelector('.pdd32-product-spec__detail-text')?.textContent?.trim() || "";
-    if (title && text) {
-      markdown += `| ${title} | ${text} |\n`;
-    }
-  });
-  return markdown;
+  // ── Pattern 1: Samsung Global SSR (pdd32 classes) ──
+  const pdd32Items = root.querySelectorAll('.pdd32-product-spec__detail-item');
+  if (pdd32Items.length > 0) {
+    const rows: Array<[string, string]> = [];
+    pdd32Items.forEach(item => {
+      const title = item.querySelector('.pdd32-product-spec__detail-title')?.textContent?.trim() || "";
+      const text  = item.querySelector('.pdd32-product-spec__detail-text')?.textContent?.trim()  || "";
+      if (title && text) rows.push([title, text]);
+    });
+    return buildTable(rows);
+  }
+
+  // ── Pattern 2: Samsung Korea getGoodsSpecList — table th/td (most common) ──
+  {
+    const rows: Array<[string, string]> = [];
+    root.querySelectorAll('table tr').forEach(row => {
+      const th = row.querySelector('th');
+      const td = row.querySelector('td');
+      const title = th?.textContent?.trim() || "";
+      const value = td?.textContent?.trim() || "";
+      if (title && value) rows.push([title, value]);
+    });
+    if (rows.length > 0) return buildTable(rows);
+  }
+
+  // ── Pattern 2b: td+td rows (no <th> — some Samsung Korea pages) ──
+  {
+    const rows: Array<[string, string]> = [];
+    root.querySelectorAll('table tr').forEach(row => {
+      const tds = row.querySelectorAll('td');
+      if (tds.length >= 2) {
+        const title = tds[0].textContent?.trim() || "";
+        const value = tds[1].textContent?.trim() || "";
+        if (title && value) rows.push([title, value]);
+      }
+    });
+    if (rows.length > 0) return buildTable(rows);
+  }
+
+  // ── Pattern 3: DL / DT + DD pairs ──
+  {
+    const rows: Array<[string, string]> = [];
+    root.querySelectorAll('dl').forEach(dl => {
+      const dts = dl.querySelectorAll('dt');
+      dts.forEach(dt => {
+        const title = dt.textContent?.trim() || "";
+        let dd = dt.nextElementSibling;
+        while (dd && dd.tagName !== 'DD') dd = dd.nextElementSibling;
+        const value = dd?.textContent?.trim() || "";
+        if (title && value) rows.push([title, value]);
+      });
+    });
+    if (rows.length > 0) return buildTable(rows);
+  }
+
+  // ── Pattern 4: Samsung Korea list-item patterns ──
+  const listPatterns = [
+    { sel: '.lst-spec li, .list-spec li, .spec-list li, .spec_list li', t: '.tit-spec,.spec-title,.tit,.spec-tit', v: '.txt-spec,.spec-value,.txt,.spec-txt' },
+    { sel: '.spec-item',  t: '.spec-tit,.tit', v: '.spec-txt,.txt' },
+  ];
+  for (const pat of listPatterns) {
+    const rows: Array<[string, string]> = [];
+    root.querySelectorAll(pat.sel).forEach(item => {
+      const title = (item.querySelector(pat.t) as HTMLElement)?.textContent?.trim() || "";
+      const value = (item.querySelector(pat.v) as HTMLElement)?.textContent?.trim() || "";
+      if (title && value) rows.push([title, value]);
+    });
+    if (rows.length > 0) return buildTable(rows);
+  }
+
+  return "";
 };
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -1191,6 +1258,7 @@ const updateOptionPanelContent = () => {
       ${isAutoIterating ? `
         <div style="text-align:center;color:#f59e0b;font-size:12px;padding:8px;">⏳ 수집 중... (${colCount}/${cartCount})</div>` : ''}
       ${colCount > 0 && !isAutoIterating ? `
+        <button id="ws-spec-preview" style="background:#1e3a5f;border:1px solid #3b82f640;color:#93c5fd;padding:8px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;">🔍 수집 스펙 확인 (HTML 미리보기)</button>
         <button id="ws-ai" style="background:#10b981;border:none;color:white;padding:8px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;">🤖 AI 분석 (${colCount}개 완료)</button>` : ''}
     </div>`;
 
@@ -1204,6 +1272,7 @@ const updateOptionPanelContent = () => {
     showCsrResponseModal(detectedSpecMethod.lastCsrResponse, detectedSpecMethod.csrInfo?.apiUrl || '');
   });
   document.getElementById('ws-iterate')?.addEventListener('click', startAutoIteration);
+  document.getElementById('ws-spec-preview')?.addEventListener('click', showSpecPreviewModal);
   document.getElementById('ws-ai')?.addEventListener('click', sendOptionResultsToAI);
   document.querySelectorAll('.ws-rm-cat').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1452,12 +1521,21 @@ const extractGoodsIdsFromSpecHtml = (html: string): Array<{goodsId: string; good
   return result;
 };
 
+// Cache for getGoodsSpecList results — keyed by "apiUrl|goodsId" to avoid redundant fetches
+const specListCache: Map<string, string> = new Map();
+
 // Directly call getGoodsSpecList API for a specific goodsId
 const fetchGoodsSpecList = async (
   apiUrl: string,
   goodsId: string,
   goodsNm: string
 ): Promise<string> => {
+  const cacheKey = `${apiUrl}|${goodsId}`;
+  if (specListCache.has(cacheKey)) {
+    console.log('[OptionScraper] fetchGoodsSpecList cache hit:', goodsId);
+    return specListCache.get(cacheKey)!;
+  }
+
   const body = `goodsId=${encodeURIComponent(goodsId)}&goodsTpCd=20&goodsNm=${encodeURIComponent(goodsNm)}&adminYn=`;
   try {
     const res = await fetch(apiUrl, {
@@ -1467,11 +1545,17 @@ const fetchGoodsSpecList = async (
         'x-requested-with': 'XMLHttpRequest',
         'accept': 'text/html, */*; q=0.01'
       },
-      credentials: 'include',  // send cookies automatically
+      credentials: 'include',
       body
     });
     if (!res.ok) return `[HTTP ${res.status}]`;
-    return await res.text();
+    const html = await res.text();
+
+    // Debug: log first 500 chars of HTML to help diagnose parser issues
+    console.log(`[OptionScraper] fetchGoodsSpecList raw HTML (${goodsId}):`, html.replace(/<script[\s\S]*?<\/script>/gi, '').slice(0, 500));
+
+    specListCache.set(cacheKey, html);
+    return html;
   } catch (err) {
     console.error('[OptionScraper] fetchGoodsSpecList error:', err);
     return '';
@@ -1548,15 +1632,20 @@ const collectSpecData = async (): Promise<string> => {
       console.log('[OptionScraper] Strategy A: direct fetchGoodsSpecList ×', detectedSpecMethod.detectedGoodsIds.length);
       for (const { goodsId, goodsNm } of detectedSpecMethod.detectedGoodsIds) {
         const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm);
-        if (html) {
+        if (html && !html.startsWith('[HTTP ')) {
           const htmlParser = new DOMParser();
           const doc = htmlParser.parseFromString(html, 'text/html');
-          const text = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+          const parsedSpec = samsungSpecificParser(doc.body);
+          console.log(`[OptionScraper] samsungSpecificParser result for ${goodsId}:`, parsedSpec ? parsedSpec.slice(0, 200) : '(EMPTY — fallback to turndown)');
+          const text = parsedSpec || turndownService.turndown(doc.body.outerHTML);
           parts.push(`=== ${goodsNm || goodsId} ===\n${text}`);
         }
       }
-      if (parts.length > 0) return parts.join('\n\n---\n\n');
-      // fall through to Strategy B if all fetches returned empty
+      // Only use Strategy A result if at least one part has actual spec data beyond just the header
+      const hasRealData = parts.some(p => p.split('\n').filter(l => l.startsWith('|')).length > 0);
+      if (hasRealData) return parts.join('\n\n---\n\n');
+      console.warn('[OptionScraper] Strategy A: all parts empty, falling through to Strategy B');
+      parts.length = 0; // reset for Strategy B
     }
 
     // ── Strategy B: re-click spec button, sniff goodsSpec (1.5s), then direct fetch ──
@@ -1857,3 +1946,212 @@ const showCsrResponseModal = (rawResponse: string, apiUrl: string) => {
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// ── Spec HTML Preview Modal (AI 전 미리보기) ──────────────────
+
+const showSpecPreviewModal = () => {
+  document.getElementById('ws-spec-preview-modal')?.remove();
+
+  const goodsIds = detectedSpecMethod?.detectedGoodsIds || [];
+  const specListUrl = detectedSpecMethod?.getGoodsSpecListUrl || '';
+
+  if (goodsIds.length === 0 && specListCache.size === 0) {
+    showToast('⚠️ 미리볼 스펙 데이터가 없습니다. 자동 수집을 먼저 실행하세요.', 3000);
+    return;
+  }
+
+  // Gather items: prefer cached raw HTML per goodsId, fallback to optionIterationResults specData
+  const previewItems: Array<{ goodsId: string; goodsNm: string; rawHtml: string; parsedSpec: string }> = [];
+
+  // Items from cache (Strategy A fetched data)
+  for (const { goodsId, goodsNm } of goodsIds) {
+    const cacheKey = `${specListUrl}|${goodsId}`;
+    const rawHtml = specListCache.get(cacheKey) || '';
+    let parsedSpec = '';
+    if (rawHtml) {
+      const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+      parsedSpec = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+    }
+    previewItems.push({ goodsId, goodsNm: goodsNm || goodsId, rawHtml, parsedSpec });
+  }
+
+  // Fallback: use optionIterationResults specData if cache is empty
+  if (previewItems.every(i => !i.rawHtml) && optionIterationResults.length > 0) {
+    optionIterationResults.forEach(e => {
+      const key = Object.values(e.labels).join(' / ');
+      previewItems.push({ goodsId: key, goodsNm: key, rawHtml: '', parsedSpec: e.specData || '' });
+    });
+  }
+
+  const modal = document.createElement('div');
+  modal.id = 'ws-spec-preview-modal';
+  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.9);display:flex;
+    align-items:center;justify-content:center;z-index:10000002;font-family:-apple-system,system-ui,sans-serif;`;
+
+  const box = document.createElement('div');
+  box.style.cssText = `background:#1e293b;color:#e2e8f0;border-radius:16px;
+    width:95%;max-width:1000px;max-height:90vh;overflow:hidden;
+    display:flex;flex-direction:column;gap:0;
+    box-shadow:0 25px 60px rgba(0,0,0,0.7);border:1px solid #334155;`;
+
+  // Tab buttons HTML
+  const tabBtns = previewItems.map((item, idx) => `
+    <button class="ws-spec-tab" data-idx="${idx}"
+      style="padding:6px 14px;border:none;border-bottom:2px solid ${idx === 0 ? '#38bdf8' : 'transparent'};
+             background:transparent;color:${idx === 0 ? '#38bdf8' : '#6b7280'};
+             cursor:pointer;font-size:12px;font-weight:${idx === 0 ? 'bold' : 'normal'};
+             white-space:nowrap;transition:all 0.15s;">${item.goodsNm}</button>
+  `).join('');
+
+  const firstItem = previewItems[0];
+  const htmlNoscript = firstItem?.rawHtml
+    ? firstItem.rawHtml.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->').trim()
+    : '(캐시된 HTML 없음)';
+
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                padding:16px 20px 10px;border-bottom:2px solid #334155;flex-shrink:0;">
+      <div>
+        <strong style="color:#38bdf8;font-size:15px;">🔍 수집된 스펙 HTML 미리보기</strong>
+        <div style="font-size:11px;color:#6b7280;margin-top:2px;">AI 전송 전 각 상품의 응답 HTML과 파싱 결과를 확인하세요</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span style="background:#0d3b1e;color:#10b981;padding:2px 8px;border-radius:4px;font-size:11px;">
+          ${specListUrl.split('/').pop() || 'API'}
+        </span>
+        <button id="ws-spec-preview-close"
+          style="background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;line-height:1;">✕</button>
+      </div>
+    </div>
+
+    <!-- Tab bar -->
+    <div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid #334155;
+                background:#0f172a;padding:0 12px;flex-shrink:0;">
+      ${tabBtns}
+    </div>
+
+    <!-- Content: split view HTML | Parsed -->
+    <div id="ws-spec-tab-content" style="display:flex;flex:1;overflow:hidden;min-height:0;">
+      <!-- LEFT: Raw HTML (scripts stripped) -->
+      <div style="flex:1;display:flex;flex-direction:column;border-right:1px solid #334155;min-width:0;">
+        <div style="padding:8px 12px;background:#0f172a;border-bottom:1px solid #1e293b;flex-shrink:0;
+                    display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:11px;color:#6b7280;font-weight:bold;">📄 원본 HTML <span style="color:#374151;">(스크립트 제거)</span></span>
+          <div style="display:flex;gap:6px;">
+            <input id="ws-spec-html-search" type="text" placeholder="검색..."
+              style="background:#1e293b;border:1px solid #334155;border-radius:4px;
+                     padding:3px 8px;color:#e2e8f0;font-size:11px;outline:none;width:120px;">
+            <button id="ws-spec-copy-html"
+              style="background:#334155;border:none;color:#e2e8f0;padding:3px 10px;
+                     border-radius:4px;cursor:pointer;font-size:11px;">📋 복사</button>
+          </div>
+        </div>
+        <pre id="ws-spec-html-pre"
+          style="margin:0;padding:12px;font-family:'Courier New',monospace;font-size:10.5px;
+                 white-space:pre-wrap;word-break:break-all;color:#93c5fd;overflow-y:auto;flex:1;
+                 line-height:1.5;">${escapeHtml(htmlNoscript)}</pre>
+      </div>
+
+      <!-- RIGHT: Parsed Spec -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+        <div style="padding:8px 12px;background:#0f172a;border-bottom:1px solid #1e293b;flex-shrink:0;
+                    display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:11px;color:#6b7280;font-weight:bold;">✅ 파싱된 스펙 (AI 전송용)</span>
+          <button id="ws-spec-copy-parsed"
+            style="background:#334155;border:none;color:#e2e8f0;padding:3px 10px;
+                   border-radius:4px;cursor:pointer;font-size:11px;">📋 복사</button>
+        </div>
+        <pre id="ws-spec-parsed-pre"
+          style="margin:0;padding:12px;font-family:'Courier New',monospace;font-size:11px;
+                 white-space:pre-wrap;word-break:break-all;color:#34d399;overflow-y:auto;flex:1;
+                 line-height:1.5;">${escapeHtml(firstItem?.parsedSpec || '(파싱 결과 없음 — HTML 확인 필요)')}</pre>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;padding:10px 16px;border-top:1px solid #334155;
+                flex-shrink:0;gap:8px;">
+      <button id="ws-spec-send-ai"
+        style="padding:8px 20px;background:#10b981;color:white;border:none;border-radius:6px;
+               cursor:pointer;font-weight:600;font-size:13px;">🤖 확인 완료 → AI 분석</button>
+      <button id="ws-spec-preview-close2"
+        style="padding:8px 18px;background:#334155;color:#e2e8f0;border:none;
+               border-radius:6px;cursor:pointer;font-size:13px;">닫기</button>
+    </div>`;
+
+  modal.appendChild(box);
+  document.body.appendChild(modal);
+
+  // Close handlers
+  const closeModal = () => modal.remove();
+  document.getElementById('ws-spec-preview-close')?.addEventListener('click', closeModal);
+  document.getElementById('ws-spec-preview-close2')?.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+
+  // "확인 완료 → AI 분석" button
+  document.getElementById('ws-spec-send-ai')?.addEventListener('click', () => {
+    closeModal();
+    sendOptionResultsToAI();
+  });
+
+  // Tab switching
+  const renderTab = (idx: number) => {
+    const item = previewItems[idx];
+    if (!item) return;
+
+    const noScript = item.rawHtml
+      ? item.rawHtml.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->').trim()
+      : '(캐시된 HTML 없음 — 이 goodsId는 캐시에 없습니다)';
+
+    const htmlPre = document.getElementById('ws-spec-html-pre');
+    const parsedPre = document.getElementById('ws-spec-parsed-pre');
+    if (htmlPre) htmlPre.innerHTML = escapeHtml(noScript);
+    if (parsedPre) parsedPre.innerHTML = escapeHtml(item.parsedSpec || '(파싱 결과 없음)');
+
+    // Update tab styles
+    document.querySelectorAll('.ws-spec-tab').forEach((btn, i) => {
+      (btn as HTMLElement).style.color = i === idx ? '#38bdf8' : '#6b7280';
+      (btn as HTMLElement).style.borderBottomColor = i === idx ? '#38bdf8' : 'transparent';
+      (btn as HTMLElement).style.fontWeight = i === idx ? 'bold' : 'normal';
+    });
+
+    // Rebind copy buttons for current item
+    document.getElementById('ws-spec-copy-html')?.removeEventListener('click', () => {});
+    document.getElementById('ws-spec-copy-html')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(item.rawHtml || noScript).then(() => showToast('✅ HTML 복사 완료!', 2000));
+    });
+    document.getElementById('ws-spec-copy-parsed')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(item.parsedSpec || '').then(() => showToast('✅ 스펙 복사 완료!', 2000));
+    });
+  };
+
+  // Initial tab event bindings
+  document.querySelectorAll('.ws-spec-tab').forEach(btn => {
+    btn.addEventListener('click', () => renderTab(parseInt((btn as HTMLElement).dataset.idx || '0')));
+  });
+
+  // Search in HTML
+  document.getElementById('ws-spec-html-search')?.addEventListener('input', e => {
+    const q = (e.target as HTMLInputElement).value.trim().toLowerCase();
+    const pre = document.getElementById('ws-spec-html-pre');
+    if (!pre) return;
+    const currentIdx = Array.from(document.querySelectorAll('.ws-spec-tab')).findIndex(
+      b => (b as HTMLElement).style.fontWeight === 'bold'
+    );
+    const item = previewItems[currentIdx >= 0 ? currentIdx : 0];
+    const noScript = (item?.rawHtml || '').replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->');
+    if (!q) { pre.innerHTML = escapeHtml(noScript); return; }
+    pre.innerHTML = escapeHtml(noScript).replace(
+      new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+      m => `<mark style="background:#fbbf24;color:#000;">${m}</mark>`
+    );
+  });
+
+  // Initial copy bindings for tab 0
+  document.getElementById('ws-spec-copy-html')?.addEventListener('click', () => {
+    navigator.clipboard.writeText(firstItem?.rawHtml || '').then(() => showToast('✅ HTML 복사 완료!', 2000));
+  });
+  document.getElementById('ws-spec-copy-parsed')?.addEventListener('click', () => {
+    navigator.clipboard.writeText(firstItem?.parsedSpec || '').then(() => showToast('✅ 스펙 복사 완료!', 2000));
+  });
+};
+
