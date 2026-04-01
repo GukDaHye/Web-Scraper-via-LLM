@@ -1755,7 +1755,7 @@ const fetchGoodsSpecList = async (
 
 // ── Cartesian Product ─────────────────────────────────────────
 
-type BtnMap = Record<string, { text: string; selector: string }>;
+type BtnMap = Record<string, { text: string; selector: string; href?: string; modelCode?: string; modelName?: string }>;
 const cartesianProduct = (cats: OptionCategory[]): BtnMap[] => {
   if (cats.length === 0) return [];
   return cats.reduce<BtnMap[]>((acc, cat) => {
@@ -2051,11 +2051,10 @@ const startAutoIteration = async () => {
     let rawHtml = '';
 
     // ── 전략 1: modelCode 치환으로 fetch (Samsung Global radio 패턴) ──
-    // data-modelcode="QA55QN85FAUXKE" → 소문자 qa55qn85fauxke가 URL에 포함되어 있으므로 치환 가능
-    const targetBtnDef = Object.values(combo)
-      .map(btn => optionCategories.flatMap(c => c.buttons).find(b => b.selector === btn.selector))
-      .find(b => b?.modelCode);
-    const targetModelCode = targetBtnDef?.modelCode;
+    // combo 값 자체가 cat.buttons 의 참조이므로 modelCode 를 직접 읽음
+    // (selector lookup 방식은 li.pd-select-option__item 같은 비유니크 셀렉터에서 오작동)
+    const targetBtnVal = Object.values(combo).find(btn => btn.modelCode);
+    const targetModelCode = targetBtnVal?.modelCode;
 
     if (targetModelCode && detectedSpecMethod.type === 'SSR') {
       const modelUrl = buildModelUrl(targetModelCode);
@@ -2067,14 +2066,11 @@ const startAutoIteration = async () => {
 
     // ── 전략 2: href 기반 fetch ──
     if (!specData) {
-      const hrefBtnDef = Object.values(combo).map(btn =>
-        optionCategories.flatMap(c => c.buttons).find(b => b.selector === btn.selector && b.href)
-      ).find(Boolean);
-
-      if (hrefBtnDef?.href && detectedSpecMethod.type === 'SSR') {
+      const hrefBtnVal = Object.values(combo).find(btn => btn.href);
+      if (hrefBtnVal?.href && detectedSpecMethod.type === 'SSR') {
         showToast(`⏳ [${i + 1}/${combinations.length}] ${comboKey} — 링크 fetch 중...`, 0);
-        console.log(`[OptionScraper] href fetch: ${hrefBtnDef.href}`);
-        ({ specData, rawHtml } = await fetchSpecFromModelUrl(hrefBtnDef.href));
+        console.log(`[OptionScraper] href fetch: ${hrefBtnVal.href}`);
+        ({ specData, rawHtml } = await fetchSpecFromModelUrl(hrefBtnVal.href));
       }
     }
 
