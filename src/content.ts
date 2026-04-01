@@ -1528,9 +1528,10 @@ const specListCache: Map<string, string> = new Map();
 const fetchGoodsSpecList = async (
   apiUrl: string,
   goodsId: string,
-  goodsNm: string
+  goodsNm: string,
+  comboKey = ''
 ): Promise<string> => {
-  const cacheKey = `${apiUrl}|${goodsId}`;
+  const cacheKey = `${apiUrl}|${goodsId}${comboKey ? `|${comboKey}` : ''}`;
   if (specListCache.has(cacheKey)) {
     console.log('[OptionScraper] fetchGoodsSpecList cache hit:', goodsId);
     return specListCache.get(cacheKey)!;
@@ -1619,7 +1620,7 @@ const waitForUrlSettle = (prevUrl: string, timeout = 1500): Promise<string> => {
   });
 };
 
-const collectSpecData = async (): Promise<string> => {
+const collectSpecData = async (comboKey = ''): Promise<string> => {
   if (!detectedSpecMethod) return '';
 
   if (detectedSpecMethod.type === 'CSR') {
@@ -1631,7 +1632,7 @@ const collectSpecData = async (): Promise<string> => {
     if (specListUrl && detectedSpecMethod.detectedGoodsIds?.length) {
       console.log('[OptionScraper] Strategy A: direct fetchGoodsSpecList ×', detectedSpecMethod.detectedGoodsIds.length);
       for (const { goodsId, goodsNm } of detectedSpecMethod.detectedGoodsIds) {
-        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm);
+        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm, comboKey);
         if (html && !html.startsWith('[HTTP ')) {
           const htmlParser = new DOMParser();
           const doc = htmlParser.parseFromString(html, 'text/html');
@@ -1687,7 +1688,7 @@ const collectSpecData = async (): Promise<string> => {
       const goodsIds = extractGoodsIdsFromSpecHtml(goodsSpecHit.response);
       console.log('[OptionScraper] Strategy B: extracted goodsIds →', goodsIds);
       for (const { goodsId, goodsNm } of goodsIds) {
-        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm);
+        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm, comboKey);
         if (html) {
           const htmlParser = new DOMParser();
           const doc = htmlParser.parseFromString(html, 'text/html');
@@ -1753,9 +1754,10 @@ const startAutoIteration = async () => {
     const afterUrl = await waitForUrlSettle(prevUrl, 1200);
     await pause(400); // let page settle
 
+    const comboKey = Object.values(labelMap).join('/');
     let specData = '';
     try {
-      specData = await collectSpecData();
+      specData = await collectSpecData(comboKey);
     } catch (err) {
       console.error('[Option Scraper] spec collect error:', err);
     }
@@ -1955,7 +1957,7 @@ const showSpecPreviewModal = () => {
   const goodsIds = detectedSpecMethod?.detectedGoodsIds || [];
   const specListUrl = detectedSpecMethod?.getGoodsSpecListUrl || '';
 
-  if (goodsIds.length === 0 && specListCache.size === 0) {
+  if (goodsIds.length === 0 && specListCache.size === 0 && optionIterationResults.length === 0) {
     showToast('⚠️ 미리볼 스펙 데이터가 없습니다. 자동 수집을 먼저 실행하세요.', 3000);
     return;
   }
@@ -1963,24 +1965,42 @@ const showSpecPreviewModal = () => {
   // Gather items: prefer cached raw HTML per goodsId, fallback to optionIterationResults specData
   const previewItems: Array<{ goodsId: string; goodsNm: string; rawHtml: string; parsedSpec: string }> = [];
 
-  // Items from cache (Strategy A fetched data)
-  for (const { goodsId, goodsNm } of goodsIds) {
-    const cacheKey = `${specListUrl}|${goodsId}`;
-    const rawHtml = specListCache.get(cacheKey) || '';
-    let parsedSpec = '';
-    if (rawHtml) {
-      const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
-      parsedSpec = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+  if (optionIterationResults.length > 0 && goodsIds.length > 0) {
+    // ── Cross-product: optionIterationResults × goodsIds ──
+    // e.g. 4 option combos × 2 goodsIds = 8 tabs
+    for (const entry of optionIterationResults) {
+      const comboKey = Object.values(entry.labels).join('/');
+      const comboLabel = Object.values(entry.labels).join(' / ');
+      for (const { goodsId, goodsNm } of goodsIds) {
+        const cacheKey = `${specListUrl}|${goodsId}|${comboKey}`;
+        const rawHtml = specListCache.get(cacheKey) || '';
+        let parsedSpec = '';
+        if (rawHtml) {
+          const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+          parsedSpec = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+        }
+        const tabLabel = `${comboLabel} / ${goodsNm || goodsId}`;
+        previewItems.push({ goodsId, goodsNm: tabLabel, rawHtml, parsedSpec });
+      }
     }
-    previewItems.push({ goodsId, goodsNm: goodsNm || goodsId, rawHtml, parsedSpec });
-  }
-
-  // Fallback: use optionIterationResults specData if cache is empty
-  if (previewItems.every(i => !i.rawHtml) && optionIterationResults.length > 0) {
+  } else if (optionIterationResults.length > 0) {
+    // optionIterationResults만 있는 경우 → specData 직접 사용
     optionIterationResults.forEach(e => {
       const key = Object.values(e.labels).join(' / ');
       previewItems.push({ goodsId: key, goodsNm: key, rawHtml: '', parsedSpec: e.specData || '' });
     });
+  } else {
+    // goodsIds만 있는 경우 (기존 로직)
+    for (const { goodsId, goodsNm } of goodsIds) {
+      const cacheKey = `${specListUrl}|${goodsId}`;
+      const rawHtml = specListCache.get(cacheKey) || '';
+      let parsedSpec = '';
+      if (rawHtml) {
+        const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+        parsedSpec = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+      }
+      previewItems.push({ goodsId, goodsNm: goodsNm || goodsId, rawHtml, parsedSpec });
+    }
   }
 
   const modal = document.createElement('div');
@@ -2016,9 +2036,13 @@ const showSpecPreviewModal = () => {
         <div style="font-size:11px;color:#6b7280;margin-top:2px;">AI 전송 전 각 상품의 응답 HTML과 파싱 결과를 확인하세요</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
+        ${optionIterationResults.length > 0 && goodsIds.length > 0 ? `
+        <span style="background:#1e3a5f;color:#93c5fd;padding:2px 8px;border-radius:4px;font-size:11px;">
+          optionIterationResults(${optionIterationResults.length}) × goodsIds(${goodsIds.length}) → ${previewItems.length}개 항목
+        </span>` : `
         <span style="background:#0d3b1e;color:#10b981;padding:2px 8px;border-radius:4px;font-size:11px;">
-          ${specListUrl.split('/').pop() || 'API'}
-        </span>
+          ${specListUrl.split('/').pop() || 'API'} · ${previewItems.length}개 항목
+        </span>`}
         <button id="ws-spec-preview-close"
           style="background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;line-height:1;">✕</button>
       </div>
