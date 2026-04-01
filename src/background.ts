@@ -241,7 +241,6 @@ Return ONLY valid JSON. If impossible, { "error": "Cannot find mapping" }.`;
         });
       }
     });
-    sendResponse({ status: 'Analyzing API rule in background' });
   } else if (request.action === 'analyze_option_states') {
     sendResponse({ status: 'Analyzing option states in background' });
     chrome.storage.sync.get(['apiKey'], async (result) => {
@@ -254,41 +253,43 @@ Return ONLY valid JSON. If impossible, { "error": "Cannot find mapping" }.`;
           return `--- 조합 ${i + 1} [${e.renderingType}] ---\n옵션: ${labels}\nURL: ${e.afterUrl || 'N/A'}\n스펙:\n${(e.specData || '(없음)').slice(0, 600)}`;
         }).join('\n\n');
 
-        // NOTE: pythonCode as a string inside JSON breaks parsing when code contains
-        // quotes, backslashes, or unescaped newlines. Use pythonCodeLines (array) instead.
+        // KEY: Use markdown sections instead of JSON to avoid code-inside-JSON escaping issues.
+        // Python code embedded in JSON always breaks the parser (backslashes, quotes, newlines).
         const prompt = `당신은 웹 크롤링 자동화 전문가입니다.
-
-이 페이지의 옵션 버튼들을 모두 찾아내고, 각각을 클릭했을 때 스펙이 어떻게 변하는지 분석하는 코드를 짜줘.
-
-아래는 상품 상세 페이지(${request.pageUrl || ''})에서 각 옵션 조합을 클릭하며 수집한 데이터입니다.
+상품 상세 페이지(${request.pageUrl || ''})에서 각 옵션 조합을 클릭하며 수집한 데이터가 있습니다.
 
 [수집된 옵션별 스펙 데이터]
 ${entrySummary}
 
-분석 및 생성 요청:
+아래 3가지를 분석해 주세요:
 1. URL에서 SKU를 식별하는 파라미터 패턴 (예: ?goodsId=XXX, /p/SKU). 없으면 "SSR 방식".
-2. 옵션명 → SKU → 주요 스펙 차이점 매핑 테이블 (JSON 배열).
+2. 옵션명 → SKU → 주요 스펙 차이점 매핑 테이블 (JSON 배열 형식).
 3. 모든 옵션 조합의 스펙을 자동 수집하는 Python 스크립트.
-   - CSR: API 직접 호출 (requests 라이브러리)
-   - SSR: Playwright 클릭 후 DOM 파싱
+   - CSR 방식이면 requests 라이브러리로 API 직접 호출
+   - SSR 방식이면 Playwright로 클릭 후 DOM 파싱
 
-IMPORTANT: Return ONLY valid JSON. For pythonCode, use pythonCodeLines array (one string per line).
-Do NOT embed raw code in a single string - it breaks JSON parsing.
-Schema:
-{
-  "skuPattern": "string",
-  "mappingTable": [ { "labels": {}, "sku": "string", "keySpecs": {} } ],
-  "pythonCodeLines": ["line1", "line2", "..."]
-}`;
+반드시 아래 형식으로만 응답하세요 (다른 설명 없이):
+
+## SKU_PATTERN
+(단 한 줄로 SKU 파라미터 패턴 설명)
+
+## MAPPING_TABLE_JSON
+[
+  { "labels": {}, "sku": "", "keySpecs": {} }
+]
+
+## PYTHON_CODE
+\`\`\`python
+(완전한 Python 스크립트)
+\`\`\``;
 
         const config = getApiConfig(result.apiKey);
-        // Use text response to avoid Gemini wrapping code in JSON string which breaks parsing
         const aiRes = await fetch(config.url, {
           method: 'POST',
           headers: config.headers,
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { maxOutputTokens: 8192 }
+            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
           })
         });
 
@@ -296,33 +297,47 @@ Schema:
         if (!aiRes.ok) throw new Error(`Gemini API Error: ${aiRes.status} ${aiRes.statusText}`);
 
         const aiData = await aiRes.json();
-        let rawText = aiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        const rawText: string = aiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (!rawText) throw new Error('AI가 빈 응답을 반환했습니다.');
 
-        // Robust JSON extraction: find outermost { ... }
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error('AI 응답에서 JSON을 찾을 수 없습니다.');
+        // ── Parse markdown sections ──────────────────────────
+        const extractSection = (header: string, nextHeader?: string): string => {
+          const start = rawText.indexOf(`## ${header}`);
+          if (start === -1) return '';
+          const contentStart = rawText.indexOf('\n', start) + 1;
+          const end = nextHeader ? rawText.indexOf(`## ${nextHeader}`, contentStart) : rawText.length;
+          return rawText.slice(contentStart, end === -1 ? rawText.length : end).trim();
+        };
 
-        let parsed: any;
+        const skuRaw = extractSection('SKU_PATTERN', 'MAPPING_TABLE_JSON');
+        const mappingRaw = extractSection('MAPPING_TABLE_JSON', 'PYTHON_CODE');
+        const codeRaw = extractSection('PYTHON_CODE');
+
+        // Parse mapping table JSON (isolated from code, so safe to parse)
+        let mappingTable: any[] = [];
         try {
-          parsed = JSON.parse(jsonMatch[0]);
+          const arrMatch = mappingRaw.match(/\[[\s\S]*\]/);
+          if (arrMatch) mappingTable = JSON.parse(arrMatch[0]);
         } catch {
-          // Fallback: try to extract fields manually
-          const skuMatch = rawText.match(/"skuPattern"\s*:\s*"([^"]+)"/);
-          const linesMatch = rawText.match(/"pythonCodeLines"\s*:\s*\[([\s\S]*?)\]/);
-          parsed = {
-            skuPattern: skuMatch?.[1] || '패턴 추출 실패',
-            mappingTable: [],
-            pythonCodeLines: linesMatch
-              ? linesMatch[1].split('\n').map((l: string) => l.replace(/^[\s,"]+|[\s,"]+$/g, ''))
-              : ['# AI 코드 생성 실패 - 원본 응답을 확인하세요'],
-            rawResponse: rawText.slice(0, 2000)
-          };
+          mappingTable = [];
         }
 
-        // Convert pythonCodeLines array → pythonCode string for display
-        if (Array.isArray(parsed.pythonCodeLines)) {
-          parsed.pythonCode = parsed.pythonCodeLines.join('\n');
-        }
+        // Extract Python code from fenced block
+        const codeMatch = codeRaw.match(/```python\s*([\s\S]*?)```/) || codeRaw.match(/```\s*([\s\S]*?)```/);
+        const pythonCode = codeMatch ? codeMatch[1].trim() : codeRaw.trim();
+
+        const parsed = {
+          skuPattern: skuRaw || '패턴 분석 실패',
+          mappingTable,
+          pythonCode: pythonCode || '# AI 코드 생성에 실패했습니다.',
+          rawResponse: rawText.slice(0, 1000)  // for debugging
+        };
+
+        console.log('[background] analyze_option_states result:', {
+          skuPattern: parsed.skuPattern,
+          mappingRows: parsed.mappingTable.length,
+          codeLines: parsed.pythonCode.split('\n').length
+        });
 
         chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
           if (tabs.length > 0 && tabs[0].id) {
@@ -330,7 +345,7 @@ Schema:
           }
         });
       } catch (err: any) {
-        console.error(err);
+        console.error('[background] analyze_option_states error:', err);
         chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
           if (tabs.length > 0 && tabs[0].id) {
             chrome.tabs.sendMessage(tabs[0].id, { action: 'option_analysis_error', message: err.message }).catch(() => {});

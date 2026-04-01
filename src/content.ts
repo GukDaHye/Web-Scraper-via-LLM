@@ -943,9 +943,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     showOptionSidePanel();
     sendResponse({ success: true });
   } else if (request.action === 'option_analysis_complete') {
+    clearTimeout((window as any).__aiAnalysisTimeout);
     showOptionResultModal(request.result);
     sendResponse({ success: true });
   } else if (request.action === 'option_analysis_error') {
+    clearTimeout((window as any).__aiAnalysisTimeout);
+    if (activeToast) activeToast.remove();
     showToast(`❌ AI 분석 오류: ${request.message}`, 6000);
     sendResponse({ success: true });
   }
@@ -973,6 +976,7 @@ let detectedSpecMethod: {
   type: 'CSR' | 'SSR';
   csrInfo?: { apiUrl: string; method: string; body: string };
   getGoodsSpecListUrl?: string; // URL for per-goodsId spec API (e.g. getGoodsSpecList)
+  detectedGoodsIds?: Array<{goodsId: string; goodsNm: string}>; // from goodsSpec response at detect time
   ssrSelector?: string;
   specButtonSelector?: string;
   lastCsrResponse?: string; // raw response for preview
@@ -1341,16 +1345,22 @@ const finalizeDetection = (requests: any[], mutationDetected: boolean, specBtnSe
        req.url.toLowerCase().includes('goodsspeclist'))
     );
 
+    // Extract goodsIds from goodsSpec response NOW so collectSpecData can use Strategy A (no re-click)
+    const earlyGoodsIds = extractGoodsIdsFromSpecHtml(csrHit.response);
+    console.log('[OptionScraper] Early goodsIds extracted:', earlyGoodsIds);
+
     detectedSpecMethod = {
       type: 'CSR',
       csrInfo: { apiUrl: csrHit.url, method: csrHit.method, body: csrHit.body || '' },
       getGoodsSpecListUrl: specListHit?.url || deriveSpecListUrl(csrHit.url),
+      detectedGoodsIds: earlyGoodsIds.length > 0 ? earlyGoodsIds : undefined,
       specButtonSelector: specBtnSelector,
       lastCsrResponse: csrHit.response
     };
 
     const detected = specListHit ? 'goodsSpec + getGoodsSpecList' : 'goodsSpec';
-    showToast(`✅ CSR 감지! [${detected}]`, 4000);
+    const goodsCount = earlyGoodsIds.length > 0 ? ` (${earlyGoodsIds.length}개 상품)` : '';
+    showToast(`✅ CSR 감지! [${detected}]${goodsCount}`, 4000);
   } else if (mutationDetected) {
     chrome.storage.sync.get(['detailSelector'], res => {
       detectedSpecMethod = {
@@ -1377,41 +1387,68 @@ const deriveSpecListUrl = (goodsSpecUrl: string): string => {
 // Extract goodsId + goodsNm pairs from goodsSpec HTML response
 const extractGoodsIdsFromSpecHtml = (html: string): Array<{goodsId: string; goodsNm: string}> => {
   const result: Array<{goodsId: string; goodsNm: string}> = [];
+  const dedup = (goodsId: string, goodsNm: string) => {
+    if (goodsId && /^G\d+/.test(goodsId) && !result.find(r => r.goodsId === goodsId)) {
+      result.push({ goodsId, goodsNm });
+    }
+  };
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
 
-  // Strategy 1: data-goods-id attributes
-  doc.querySelectorAll('[data-goods-id], [data-goodsid]').forEach(el => {
-    const goodsId = (el as HTMLElement).dataset.goodsId || (el as HTMLElement).dataset.goodsid || '';
-    const goodsNm = (el as HTMLElement).dataset.goodsNm || (el as HTMLElement).dataset.goodsnm ||
+  // Strategy 1 (Samsung bundle): data-cstrt-goods-id = component goodsId for getGoodsSpecList
+  // data-goods-id is the PACKAGE goodsId — DO NOT use it for spec requests
+  // data-disp-nm = model name displayed to user
+  doc.querySelectorAll('[data-cstrt-goods-id]').forEach(el => {
+    const goodsId = (el as HTMLElement).dataset.cstrtGoodsId || '';
+    const goodsNm = (el as HTMLElement).dataset.dispNm ||
+                    (el as HTMLElement).dataset.goodsNm ||
                     el.textContent?.trim() || '';
-    if (goodsId && /^G\d+/.test(goodsId)) result.push({ goodsId, goodsNm });
+    dedup(goodsId, goodsNm);
   });
 
-  // Strategy 2: hidden inputs with name goodsId
+  // Strategy 2: generic data-goods-id / data-goodsid (other sites, NOT Samsung package)
+  if (result.length === 0) {
+    doc.querySelectorAll('[data-goods-id], [data-goodsid]').forEach(el => {
+      const goodsId = (el as HTMLElement).dataset.goodsId || (el as HTMLElement).dataset.goodsid || '';
+      const goodsNm = (el as HTMLElement).dataset.dispNm ||
+                      (el as HTMLElement).dataset.goodsNm || el.textContent?.trim() || '';
+      dedup(goodsId, goodsNm);
+    });
+  }
+
+  // Strategy 3: hidden inputs
   if (result.length === 0) {
     doc.querySelectorAll('input[name="goodsId"]').forEach(el => {
       const goodsId = (el as HTMLInputElement).value;
       const nmInput = el.closest('form, [class*="spec"], [class*="item"]')?.querySelector('input[name="goodsNm"]');
       const goodsNm = (nmInput as HTMLInputElement)?.value || '';
-      if (goodsId && /^G\d+/.test(goodsId)) result.push({ goodsId, goodsNm });
+      dedup(goodsId, goodsNm);
     });
   }
 
-  // Strategy 3: regex scan for goodsId pattern in raw HTML
+  // Strategy 4: regex scan (last resort) — matches cstrtGoodsId, data-cstrt-goods-id, goodsId literals
   if (result.length === 0) {
-    const goodsIdMatches = [...html.matchAll(/goodsId["']?\s*[=:"']+\s*(["']?)(G\d{7,12})\1/gi)];
-    const goodsNmMatches = [...html.matchAll(/goodsNm["']?\s*[=:"']+\s*["']([A-Z0-9\-\/]+)["']/gi)];
-    goodsIdMatches.forEach((m, i) => {
-      const goodsId = m[2];
-      const goodsNm = goodsNmMatches[i]?.[1] || '';
-      if (goodsId && !result.find(r => r.goodsId === goodsId)) {
-        result.push({ goodsId, goodsNm });
+    const patterns = [
+      /data-cstrt-goods-id=["']?(G\d{7,12})["']?/gi,  // Samsung specific
+      /goodsId\s*:\s*(G\d{7,12})/gi,                    // JS object literal
+      /goodsId=["']?(G\d{7,12})["']?/gi,                // URL param or input
+    ];
+    const nmPatterns = [
+      /data-disp-nm=["']([^"']+)["']/gi,
+      /goodsNm\s*:\s*["']([^"']+)["']/gi,
+    ];
+    for (const pat of patterns) {
+      const matches = [...html.matchAll(pat)];
+      if (matches.length > 0) {
+        const nmMatches = nmPatterns.flatMap(p => [...html.matchAll(p)]);
+        matches.forEach((m, i) => dedup(m[1], nmMatches[i]?.[1] || ''));
+        break;
       }
-    });
+    }
   }
 
-  console.log('[OptionScraper] extractGoodsIds:', result);
+  console.log('[OptionScraper] extractGoodsIds result:', result);
   return result;
 };
 
@@ -1502,79 +1539,83 @@ const collectSpecData = async (): Promise<string> => {
   if (!detectedSpecMethod) return '';
 
   if (detectedSpecMethod.type === 'CSR') {
-    // 1. Re-trigger spec button → sniff goodsSpec + getGoodsSpecList responses
+    const parts: string[] = [];
+    const specListUrl = detectedSpecMethod.getGoodsSpecListUrl;
+
+    // ── Strategy A: direct fetch using stored goodsIds (fast, no re-click needed) ──
+    // goodsIds were extracted from goodsSpec during finalizeDetection
+    if (specListUrl && detectedSpecMethod.detectedGoodsIds?.length) {
+      console.log('[OptionScraper] Strategy A: direct fetchGoodsSpecList ×', detectedSpecMethod.detectedGoodsIds.length);
+      for (const { goodsId, goodsNm } of detectedSpecMethod.detectedGoodsIds) {
+        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm);
+        if (html) {
+          const htmlParser = new DOMParser();
+          const doc = htmlParser.parseFromString(html, 'text/html');
+          const text = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+          parts.push(`=== ${goodsNm || goodsId} ===\n${text}`);
+        }
+      }
+      if (parts.length > 0) return parts.join('\n\n---\n\n');
+      // fall through to Strategy B if all fetches returned empty
+    }
+
+    // ── Strategy B: re-click spec button, sniff goodsSpec (1.5s), then direct fetch ──
     sniffedRequests = [];
     isSniffingActive = true;
     if (detectedSpecMethod.specButtonSelector) {
       await clickBySelector(detectedSpecMethod.specButtonSelector);
     }
-    // Wait longer: goodsSpec fires first (~500ms), getGoodsSpecList may come later (~2-3s)
-    await pause(3500);
+    // Wait only 1.5s — goodsSpec fires immediately on click
+    await pause(1500);
     isSniffingActive = false;
 
-    // Filter: must have a response body (note: stage stays 'start' after merge, use response field)
     const allWithResponse = sniffedRequests.filter(r => r.response && r.response.trim().length > 10);
+    console.log('[OptionScraper] Strategy B captured URLs →', allWithResponse.map(r => r.url));
+
     const csrApiBase = (detectedSpecMethod.csrInfo?.apiUrl || '').split('?')[0].split('/').pop() || '';
 
-    console.log('[OptionScraper] collectSpecData: captured URLs →', allWithResponse.map(r => r.url));
-
-    // 2. Find the goodsSpec response (the "index" API — lists all goodsIds in this bundle)
+    // Find goodsSpec response (index telling us which sub-products exist)
     const goodsSpecHit = allWithResponse.find(r =>
       r.url.includes(csrApiBase) || r.url.toLowerCase().includes('goodsspec')
     );
 
-    // 3. Find all getGoodsSpecList responses (one per sub-product if auto-fired)
+    // Also check if getGoodsSpecList auto-fired (captured in same window)
     const specListHits = allWithResponse.filter(r =>
       r.url.toLowerCase().includes('getgoodsspeclist') ||
       (r.url.toLowerCase().includes('speclist') && !r.url.toLowerCase().includes('goodsspec'))
     );
 
-    console.log('[OptionScraper] goodsSpecHit:', !!goodsSpecHit, '| specListHits:', specListHits.length);
-
-    const parts: string[] = [];
-
-    // If getGoodsSpecList already fired automatically, use those responses
     if (specListHits.length > 0) {
+      // getGoodsSpecList came in automatically — use captured responses directly
+      console.log('[OptionScraper] Strategy B: using', specListHits.length, 'auto-fired specListHits');
       for (const hit of specListHits) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(hit.response, 'text/html');
-        const parsed = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
-        parts.push(parsed);
+        const htmlParser = new DOMParser();
+        const doc = htmlParser.parseFromString(hit.response, 'text/html');
+        parts.push(samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML));
       }
-    } else if (goodsSpecHit?.response && detectedSpecMethod.getGoodsSpecListUrl) {
-      // 4. Parse goodsSpec response to extract goodsId list, then fetch each individually
+    } else if (goodsSpecHit?.response && specListUrl) {
+      // goodsSpec captured but getGoodsSpecList not auto-fired → extract goodsIds + direct fetch
       const goodsIds = extractGoodsIdsFromSpecHtml(goodsSpecHit.response);
-      console.log('[OptionScraper] goodsIds to fetch:', goodsIds);
-
-      if (goodsIds.length > 0) {
-        for (const { goodsId, goodsNm } of goodsIds) {
-          const html = await fetchGoodsSpecList(
-            detectedSpecMethod.getGoodsSpecListUrl,
-            goodsId,
-            goodsNm
-          );
-          if (html) {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
-            const parsed = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
-            parts.push(`=== ${goodsNm || goodsId} ===\n${parsed}`);
-          }
+      console.log('[OptionScraper] Strategy B: extracted goodsIds →', goodsIds);
+      for (const { goodsId, goodsNm } of goodsIds) {
+        const html = await fetchGoodsSpecList(specListUrl, goodsId, goodsNm);
+        if (html) {
+          const htmlParser = new DOMParser();
+          const doc = htmlParser.parseFromString(html, 'text/html');
+          const text = samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML);
+          parts.push(`=== ${goodsNm || goodsId} ===\n${text}`);
         }
-      } else {
-        // Fallback: just return the goodsSpec response as-is
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(goodsSpecHit.response, 'text/html');
+      }
+      if (parts.length === 0 && goodsSpecHit.response) {
+        const htmlParser = new DOMParser();
+        const doc = htmlParser.parseFromString(goodsSpecHit.response, 'text/html');
         parts.push(samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML));
       }
     } else if (goodsSpecHit?.response) {
-      // Fallback: no getGoodsSpecList URL, return goodsSpec directly
-      try {
-        parts.push(JSON.stringify(JSON.parse(goodsSpecHit.response), null, 2));
-      } catch {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(goodsSpecHit.response, 'text/html');
-        parts.push(samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML));
-      }
+      // Fallback: return goodsSpec as-is
+      const htmlParser = new DOMParser();
+      const doc = htmlParser.parseFromString(goodsSpecHit.response, 'text/html');
+      parts.push(samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML));
     }
 
     return parts.join('\n\n---\n\n');
@@ -1651,7 +1692,26 @@ const startAutoIteration = async () => {
 
 const sendOptionResultsToAI = () => {
   if (optionIterationResults.length === 0) { showToast('⚠️ 수집된 데이터가 없습니다.', 3000); return; }
-  showToast('🤖 Gemini AI 분석 중...', 0);
+
+  // Warn if specData is empty for all entries
+  const hasSpec = optionIterationResults.some(e => e.specData && e.specData.trim().length > 20);
+  if (!hasSpec) {
+    showToast('⚠️ 수집된 스펙 데이터가 비어 있습니다. 재감지 후 다시 시도해 주세요.', 4000);
+    console.warn('[OptionScraper] All specData is empty. Entries:', optionIterationResults);
+    return;
+  }
+
+  showToast('🤖 Gemini AI 분석 중... (최대 30초)', 0);
+
+  // Timeout: if background doesn't respond in 30s, show error
+  const aiTimeout = setTimeout(() => {
+    if (activeToast) activeToast.remove();
+    showToast('❌ AI 응답 시간 초과 (30초). 다시 시도해 주세요.', 5000);
+  }, 30000);
+
+  // Store timeout ID so result handler can cancel it
+  (window as any).__aiAnalysisTimeout = aiTimeout;
+
   chrome.runtime.sendMessage({
     action: 'analyze_option_states',
     optionEntries: optionIterationResults,
