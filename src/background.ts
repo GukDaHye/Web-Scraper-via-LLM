@@ -242,6 +242,102 @@ Return ONLY valid JSON. If impossible, { "error": "Cannot find mapping" }.`;
       }
     });
     sendResponse({ status: 'Analyzing API rule in background' });
+  } else if (request.action === 'analyze_option_states') {
+    sendResponse({ status: 'Analyzing option states in background' });
+    chrome.storage.sync.get(['apiKey'], async (result) => {
+      try {
+        if (!result.apiKey) throw new Error('API Key missing. Please config in popup.');
+
+        const entries = request.optionEntries || [];
+        const entrySummary = entries.map((e: any, i: number) => {
+          const labels = Object.entries(e.labels || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+          return `--- 조합 ${i + 1} [${e.renderingType}] ---\n옵션: ${labels}\nURL: ${e.afterUrl || 'N/A'}\n스펙:\n${(e.specData || '(없음)').slice(0, 600)}`;
+        }).join('\n\n');
+
+        // NOTE: pythonCode as a string inside JSON breaks parsing when code contains
+        // quotes, backslashes, or unescaped newlines. Use pythonCodeLines (array) instead.
+        const prompt = `당신은 웹 크롤링 자동화 전문가입니다.
+
+이 페이지의 옵션 버튼들을 모두 찾아내고, 각각을 클릭했을 때 스펙이 어떻게 변하는지 분석하는 코드를 짜줘.
+
+아래는 상품 상세 페이지(${request.pageUrl || ''})에서 각 옵션 조합을 클릭하며 수집한 데이터입니다.
+
+[수집된 옵션별 스펙 데이터]
+${entrySummary}
+
+분석 및 생성 요청:
+1. URL에서 SKU를 식별하는 파라미터 패턴 (예: ?goodsId=XXX, /p/SKU). 없으면 "SSR 방식".
+2. 옵션명 → SKU → 주요 스펙 차이점 매핑 테이블 (JSON 배열).
+3. 모든 옵션 조합의 스펙을 자동 수집하는 Python 스크립트.
+   - CSR: API 직접 호출 (requests 라이브러리)
+   - SSR: Playwright 클릭 후 DOM 파싱
+
+IMPORTANT: Return ONLY valid JSON. For pythonCode, use pythonCodeLines array (one string per line).
+Do NOT embed raw code in a single string - it breaks JSON parsing.
+Schema:
+{
+  "skuPattern": "string",
+  "mappingTable": [ { "labels": {}, "sku": "string", "keySpecs": {} } ],
+  "pythonCodeLines": ["line1", "line2", "..."]
+}`;
+
+        const config = getApiConfig(result.apiKey);
+        // Use text response to avoid Gemini wrapping code in JSON string which breaks parsing
+        const aiRes = await fetch(config.url, {
+          method: 'POST',
+          headers: config.headers,
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 8192 }
+          })
+        });
+
+        if (aiRes.status === 429) throw new Error('Gemini API 할당량 초과! 잠시 후 다시 시도해 주세요.');
+        if (!aiRes.ok) throw new Error(`Gemini API Error: ${aiRes.status} ${aiRes.statusText}`);
+
+        const aiData = await aiRes.json();
+        let rawText = aiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+
+        // Robust JSON extraction: find outermost { ... }
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error('AI 응답에서 JSON을 찾을 수 없습니다.');
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          // Fallback: try to extract fields manually
+          const skuMatch = rawText.match(/"skuPattern"\s*:\s*"([^"]+)"/);
+          const linesMatch = rawText.match(/"pythonCodeLines"\s*:\s*\[([\s\S]*?)\]/);
+          parsed = {
+            skuPattern: skuMatch?.[1] || '패턴 추출 실패',
+            mappingTable: [],
+            pythonCodeLines: linesMatch
+              ? linesMatch[1].split('\n').map((l: string) => l.replace(/^[\s,"]+|[\s,"]+$/g, ''))
+              : ['# AI 코드 생성 실패 - 원본 응답을 확인하세요'],
+            rawResponse: rawText.slice(0, 2000)
+          };
+        }
+
+        // Convert pythonCodeLines array → pythonCode string for display
+        if (Array.isArray(parsed.pythonCodeLines)) {
+          parsed.pythonCode = parsed.pythonCodeLines.join('\n');
+        }
+
+        chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+          if (tabs.length > 0 && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { action: 'option_analysis_complete', result: parsed }).catch(() => {});
+          }
+        });
+      } catch (err: any) {
+        console.error(err);
+        chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+          if (tabs.length > 0 && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { action: 'option_analysis_error', message: err.message }).catch(() => {});
+          }
+        });
+      }
+    });
   }
 
   return true;

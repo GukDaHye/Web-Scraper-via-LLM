@@ -96,4 +96,26 @@
 
     return originalXhrSend.apply(this, [body]);
   };
+
+  // ── URL Change Hooks (for SPA option tracking) ──
+  const dispatchUrlChange = () => {
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_URL_CHANGE', {
+      detail: { url: location.href }
+    }));
+  };
+
+  const origPushState = history.pushState.bind(history);
+  history.pushState = function(...args: Parameters<typeof history.pushState>) {
+    origPushState(...args);
+    dispatchUrlChange();
+  };
+
+  const origReplaceState = history.replaceState.bind(history);
+  history.replaceState = function(...args: Parameters<typeof history.replaceState>) {
+    origReplaceState(...args);
+    dispatchUrlChange();
+  };
+
+  window.addEventListener('popstate', dispatchUrlChange);
+  window.addEventListener('hashchange', dispatchUrlChange);
 })();
