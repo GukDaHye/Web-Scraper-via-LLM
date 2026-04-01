@@ -1028,7 +1028,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
 interface OptionCategory {
   name: string;
-  buttons: Array<{ text: string; selector: string }>;
+  buttons: Array<{
+    text: string;
+    selector: string;
+    href?: string;          // <a> 링크 URL
+    modelCode?: string;     // data-modelcode (Samsung radio 버튼)
+    modelName?: string;     // data-modelname (URL 치환에 사용)
+  }>;
 }
 
 interface OptionEntry {
@@ -1036,6 +1042,7 @@ interface OptionEntry {
   afterUrl: string;
   renderingType: 'CSR' | 'SSR' | 'UNKNOWN';
   specData: string;
+  rawHtml?: string; // SSR: el.outerHTML, CSR: specListCache에서 별도 관리
 }
 
 let optionCategories: OptionCategory[] = [];
@@ -1051,6 +1058,9 @@ let detectedSpecMethod: {
 let optionSidePanel: HTMLDivElement | null = null;
 let optionIterationResults: OptionEntry[] = [];
 let isAutoIterating = false;
+
+// SSR detection: track which specific element changed when spec button was clicked
+let mutationChangedEl: HTMLElement | null = null;
 
 // Listen for URL changes from main-world
 window.addEventListener('__WEB_SCRAPER_URL_CHANGE', (_e: Event) => {
@@ -1148,7 +1158,23 @@ const processSelectedArea = (rect: { left: number; top: number; right: number; b
 
   const category: OptionCategory = {
     name: catName,
-    buttons: unique.map(b => ({ text: b.text, selector: getUniqueSelector(b.el) }))
+    buttons: unique.map(b => {
+      // ① <a> 링크 href 추출
+      const anchor = b.el.closest('a') as HTMLAnchorElement | null;
+      const rawHref = anchor?.href || (b.el instanceof HTMLAnchorElement ? b.el.href : undefined);
+      const href = rawHref && !rawHref.startsWith('javascript') && rawHref !== window.location.href
+        ? rawHref : undefined;
+
+      // ② Samsung Global radio 버튼: 자신 또는 가장 가까운 <li> 안의 hidden input에서 model 데이터 추출
+      const radioInput = (
+        b.el.querySelector('input[data-modelcode]') ||
+        b.el.closest('li,div')?.querySelector('input[data-modelcode]')
+      ) as HTMLInputElement | null;
+      const modelCode = radioInput?.dataset.modelcode || undefined;
+      const modelName = radioInput?.dataset.modelname || undefined;
+
+      return { text: b.text, selector: getUniqueSelector(b.el), href, modelCode, modelName };
+    })
   };
 
   optionCategories.push(category);
@@ -1204,8 +1230,13 @@ const updateOptionPanelContent = () => {
               <button class="ws-rm-cat" data-i="${i}" style="background:#ef444420;border:1px solid #ef444440;color:#ef4444;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:10px;">삭제</button>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:3px;">
-              ${cat.buttons.slice(0, 8).map(b => `<span style="background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:3px;font-size:11px;">${b.text}</span>`).join('')}
+              ${cat.buttons.slice(0, 8).map(b => `<span style="background:#1e3a5f;color:#93c5fd;padding:1px 6px;border-radius:3px;font-size:11px;" title="${b.modelCode || b.href || ''}">${b.modelCode ? '📟' : b.href ? '🔗' : ''}${b.text}</span>`).join('')}
               ${cat.buttons.length > 8 ? `<span style="color:#6b7280;font-size:11px;">+${cat.buttons.length - 8}</span>` : ''}
+            </div>
+            <div style="font-size:10px;margin-top:4px;">
+              ${cat.buttons.some(b => b.modelCode) ? `<span style="color:#10b981;">✅ 모델코드 감지 — URL 치환 fetch 방식</span>`
+                : cat.buttons.some(b => b.href)    ? `<span style="color:#10b981;">✅ 링크 감지 — fetch 방식</span>`
+                : `<span style="color:#f59e0b;">⚠️ 링크/모델 없음 — DOM 클릭 방식</span>`}
             </div>
           </div>`).join('')
       }
@@ -1223,13 +1254,19 @@ const updateOptionPanelContent = () => {
       ${detectedSpecMethod
         ? `<div style="background:#0f172a;border-radius:6px;padding:8px;border:1px solid ${tc(detectedSpecMethod.type)}40;">
             <span style="color:${tc(detectedSpecMethod.type)};font-weight:bold;font-size:12px;">✅ ${detectedSpecMethod.type} 방식 감지됨</span>
-            <div style="font-size:10px;color:#6b7280;margin-top:3px;word-break:break-all;">
-              ${detectedSpecMethod.type === 'CSR' ? (detectedSpecMethod.csrInfo?.apiUrl?.split('/').pop()?.split('?')[0] || '') : (detectedSpecMethod.ssrSelector || '')}
+            <div style="font-size:10px;color:#6b7280;margin-top:3px;word-break:break-all;
+                        max-height:36px;overflow:hidden;text-overflow:ellipsis;">
+              ${detectedSpecMethod.type === 'CSR'
+                ? (detectedSpecMethod.csrInfo?.apiUrl?.split('/').pop()?.split('?')[0] || '')
+                : `📍 ${detectedSpecMethod.ssrSelector || '(selector 없음)'}`}
             </div>
-            <div style="display:flex;gap:6px;margin-top:6px;">
+            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
               <button id="ws-re-detect" style="flex:1;background:#334155;border:none;color:#9ca3af;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;">🔄 재감지</button>
               ${detectedSpecMethod.type === 'CSR' && detectedSpecMethod.lastCsrResponse
                 ? `<button id="ws-preview-csr" style="flex:1;background:#1e3a5f;border:none;color:#93c5fd;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;">🔍 응답 확인</button>`
+                : ''}
+              ${detectedSpecMethod.type === 'SSR' && detectedSpecMethod.ssrSelector
+                ? `<button id="ws-ssr-highlight-btn" style="flex:1;background:#1a2e46;border:none;color:#93c5fd;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;">👁 영역 확인</button>`
                 : ''}
             </div>
           </div>`
@@ -1271,6 +1308,17 @@ const updateOptionPanelContent = () => {
     if (!detectedSpecMethod?.lastCsrResponse) return;
     showCsrResponseModal(detectedSpecMethod.lastCsrResponse, detectedSpecMethod.csrInfo?.apiUrl || '');
   });
+  document.getElementById('ws-ssr-highlight-btn')?.addEventListener('click', () => {
+    const sel = detectedSpecMethod?.ssrSelector;
+    if (!sel) return;
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) { showToast(`⚠️ 요소를 찾을 수 없습니다: ${sel}`, 3000); return; }
+    el.style.outline = '3px solid #3b82f6';
+    el.style.outlineOffset = '3px';
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => { el.style.outline = ''; el.style.outlineOffset = ''; }, 3000);
+    showToast(`📍 SSR 스펙 영역이 파란 테두리로 표시됩니다.`, 3000);
+  });
   document.getElementById('ws-iterate')?.addEventListener('click', startAutoIteration);
   document.getElementById('ws-spec-preview')?.addEventListener('click', showSpecPreviewModal);
   document.getElementById('ws-ai')?.addEventListener('click', sendOptionResultsToAI);
@@ -1294,6 +1342,7 @@ const startSpecDetection = () => {
   let mutationDetected = false;
   let observer: MutationObserver | null = null;
   let specBtnSelector = '';
+  mutationChangedEl = null; // reset SSR tracking
 
   // Setup SSR observer on detailSelector (async) + fallback on body
   const setupSsrObserver = (sel: string | null) => {
@@ -1318,10 +1367,29 @@ const startSpecDetection = () => {
       beforeDisplayMap.set(el, window.getComputedStyle(el).display);
     });
 
-    observer = new MutationObserver(() => {
+    observer = new MutationObserver((mutations) => {
       // Check visible text increase (content appeared)
       const afterLen = getVisibleTextLen(observeTarget);
-      if (afterLen > beforeLen + 50) { mutationDetected = true; return; }
+      if (afterLen > beforeLen + 50) {
+        mutationDetected = true;
+        // Track the added node that caused the content to appear
+        if (!mutationChangedEl) {
+          for (const mutation of mutations) {
+            for (const node of Array.from(mutation.addedNodes)) {
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                const el = node as HTMLElement;
+                const rect = el.getBoundingClientRect();
+                if (rect.height > 20 && rect.width > 20 && el.offsetParent !== null) {
+                  mutationChangedEl = el;
+                  break;
+                }
+              }
+            }
+            if (mutationChangedEl) break;
+          }
+        }
+        return;
+      }
 
       // Check if any element changed from display:none to visible
       observeTarget.querySelectorAll('*').forEach(el => {
@@ -1329,6 +1397,13 @@ const startSpecDetection = () => {
         const curDisplay = window.getComputedStyle(el).display;
         if (prevDisplay === 'none' && curDisplay !== 'none') {
           mutationDetected = true;
+          // Prefer larger, more meaningful elements
+          if (!mutationChangedEl) {
+            const rect = el.getBoundingClientRect();
+            if (rect.height > 20 && rect.width > 20) {
+              mutationChangedEl = el as HTMLElement;
+            }
+          }
         }
       });
     });
@@ -1383,7 +1458,7 @@ const startSpecDetection = () => {
   document.addEventListener('keydown', onEsc, true);
 };
 
-const finalizeDetection = (requests: any[], mutationDetected: boolean, specBtnSelector: string) => {
+const finalizeDetection = (requests: any[], _mutationDetected: boolean, specBtnSelector: string) => {
   const withResponse = requests.filter(r => r.response && r.response.trim().length > 10);
 
   console.log('[OptionScraper] finalizeDetection: total requests:', requests.length, ', with response:', withResponse.length);
@@ -1430,21 +1505,136 @@ const finalizeDetection = (requests: any[], mutationDetected: boolean, specBtnSe
     const detected = specListHit ? 'goodsSpec + getGoodsSpecList' : 'goodsSpec';
     const goodsCount = earlyGoodsIds.length > 0 ? ` (${earlyGoodsIds.length}개 상품)` : '';
     showToast(`✅ CSR 감지! [${detected}]${goodsCount}`, 4000);
-  } else if (mutationDetected) {
-    chrome.storage.sync.get(['detailSelector'], res => {
-      detectedSpecMethod = {
-        type: 'SSR',
-        ssrSelector: res.detailSelector || '',
-        specButtonSelector: specBtnSelector
-      };
-      showToast(`✅ SSR 감지! Selector: ${res.detailSelector || ''}`, 4000);
-      updateOptionPanelContent();
-    });
-    return;
+    updateOptionPanelContent();
   } else {
-    showToast('⚠️ 스펙 방식을 감지하지 못했습니다. 다시 시도해 주세요.', 4000);
+    // SSR 경로 — CSR 요청이 없으면 항상 직접 선택으로
+    // mutationChangedEl 이 있으면 힌트(노란 점선)로 표시
+    startSsrElementPicker(specBtnSelector);
   }
-  updateOptionPanelContent();
+};
+
+// ── SSR Element Picker ────────────────────────────────────────
+// CSR 요청이 감지되지 않으면 호출됨.
+// MutationObserver가 잡은 요소는 노란 점선 힌트로 표시하고,
+// 사용자가 실제 스펙 데이터 영역을 직접 클릭해서 확정한다.
+
+const startSsrElementPicker = (specBtnSelector: string) => {
+  injectStyles();
+  if (activeToast) activeToast.remove();
+  document.getElementById('ws-ssr-confirm-ui')?.remove();
+
+  // ── 힌트: MutationObserver가 감지한 요소에 노란 점선 표시 ──
+  const HINT_ATTR = 'data-ws-ssr-hint';
+  if (mutationChangedEl) {
+    mutationChangedEl.style.outline = '2px dashed #f59e0b';
+    mutationChangedEl.style.outlineOffset = '3px';
+    mutationChangedEl.setAttribute(HINT_ATTR, 'true');
+    mutationChangedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  const removeHints = () => {
+    document.querySelectorAll(`[${HINT_ATTR}]`).forEach(e => {
+      (e as HTMLElement).style.outline = '';
+      (e as HTMLElement).style.outlineOffset = '';
+      (e as HTMLElement).removeAttribute(HINT_ATTR);
+    });
+  };
+
+  // ── 안내 오버레이 ──
+  const guide = document.createElement('div');
+  guide.id = 'ws-ssr-confirm-ui';
+  guide.style.cssText = `
+    position:fixed;top:16px;left:50%;transform:translateX(-50%);
+    background:#1e293b;color:#e2e8f0;padding:14px 18px;
+    border-radius:10px;z-index:9999999;
+    font-family:-apple-system,system-ui,sans-serif;font-size:13px;
+    box-shadow:0 10px 40px rgba(0,0,0,0.6);border:2px solid #f59e0b;
+    display:flex;align-items:center;gap:12px;max-width:520px;width:92%;
+  `;
+  guide.innerHTML = `
+    <span style="font-size:22px;flex-shrink:0;">📌</span>
+    <div style="flex:1;min-width:0;">
+      <div style="font-weight:bold;color:#fbbf24;font-size:13px;">
+        SSR 방식 — 스펙 데이터 영역을 클릭하세요
+      </div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:3px;line-height:1.4;">
+        ${mutationChangedEl
+          ? '노란 점선 = 자동 감지된 후보 영역. 맞으면 클릭, 아니면 실제 스펙 테이블/리스트를 직접 클릭하세요.'
+          : '스펙 탭이 열린 상태에서 스펙 데이터가 있는 표·리스트 영역을 직접 클릭하세요.'}
+      </div>
+    </div>
+    <button id="ws-ssr-picker-cancel"
+      style="flex-shrink:0;background:#ef444420;border:1px solid #ef444440;
+             color:#ef4444;border-radius:5px;padding:5px 10px;
+             cursor:pointer;font-size:11px;white-space:nowrap;">
+      ESC 취소
+    </button>
+  `;
+  document.body.appendChild(guide);
+
+  let pickHovered: HTMLElement | null = null;
+
+  const cleanup = () => {
+    document.removeEventListener('mouseover', onHover, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    if (pickHovered) pickHovered.classList.remove('web-scraper-highlight');
+    removeHints();
+    document.getElementById('ws-ssr-confirm-ui')?.remove();
+  };
+
+  const onHover = (e: MouseEvent) => {
+    const tgt = e.target as HTMLElement;
+    if (tgt.closest('#ws-ssr-confirm-ui') || tgt.closest('#web-scraper-option-panel')) return;
+    if (pickHovered && pickHovered !== tgt) pickHovered.classList.remove('web-scraper-highlight');
+    pickHovered = tgt;
+    tgt.classList.add('web-scraper-highlight');
+  };
+
+  const onClick = (e: MouseEvent) => {
+    const tgt = e.target as HTMLElement;
+    if (tgt.closest('#ws-ssr-confirm-ui') || tgt.closest('#web-scraper-option-panel')) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (pickHovered) pickHovered.classList.remove('web-scraper-highlight');
+    cleanup();
+
+    const sel = getUniqueSelector(tgt);
+
+    // 초록 테두리 2.5초 flash → 선택 확인
+    tgt.style.outline = '3px solid #10b981';
+    tgt.style.outlineOffset = '3px';
+    setTimeout(() => { tgt.style.outline = ''; tgt.style.outlineOffset = ''; }, 2500);
+
+    detectedSpecMethod = {
+      type: 'SSR',
+      ssrSelector: sel,
+      specButtonSelector: specBtnSelector
+    };
+
+    if (activeToast) activeToast.remove();
+    showToast(`✅ SSR 스펙 영역 확정! 이제 자동 수집을 시작하세요.`, 4000);
+    updateOptionPanelContent();
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      cleanup();
+      if (activeToast) activeToast.remove();
+      showToast('취소됨', 1500);
+    }
+  };
+
+  document.getElementById('ws-ssr-picker-cancel')?.addEventListener('click', () => {
+    cleanup();
+    if (activeToast) activeToast.remove();
+    showToast('취소됨', 1500);
+  });
+
+  document.addEventListener('mouseover', onHover, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKeyDown, true);
 };
 
 // Derive getGoodsSpecList URL from goodsSpec URL (Samsung pattern)
@@ -1620,8 +1810,8 @@ const waitForUrlSettle = (prevUrl: string, timeout = 1500): Promise<string> => {
   });
 };
 
-const collectSpecData = async (comboKey = ''): Promise<string> => {
-  if (!detectedSpecMethod) return '';
+const collectSpecData = async (comboKey = ''): Promise<{ specData: string; rawHtml: string }> => {
+  if (!detectedSpecMethod) return { specData: '', rawHtml: '' };
 
   if (detectedSpecMethod.type === 'CSR') {
     const parts: string[] = [];
@@ -1644,7 +1834,7 @@ const collectSpecData = async (comboKey = ''): Promise<string> => {
       }
       // Only use Strategy A result if at least one part has actual spec data beyond just the header
       const hasRealData = parts.some(p => p.split('\n').filter(l => l.startsWith('|')).length > 0);
-      if (hasRealData) return parts.join('\n\n---\n\n');
+      if (hasRealData) return { specData: parts.join('\n\n---\n\n'), rawHtml: '' };
       console.warn('[OptionScraper] Strategy A: all parts empty, falling through to Strategy B');
       parts.length = 0; // reset for Strategy B
     }
@@ -1708,22 +1898,47 @@ const collectSpecData = async (comboKey = ''): Promise<string> => {
       parts.push(samsungSpecificParser(doc.body) || turndownService.turndown(doc.body.outerHTML));
     }
 
-    return parts.join('\n\n---\n\n');
+    // CSR: rawHtml은 specListCache에서 별도 관리, 여기선 빈 문자열 반환
+    return { specData: parts.join('\n\n---\n\n'), rawHtml: '' };
   }
 
   if (detectedSpecMethod.type === 'SSR') {
-    if (detectedSpecMethod.specButtonSelector) {
-      await clickBySelector(detectedSpecMethod.specButtonSelector);
-      await pause(800);
-    }
     const sel = detectedSpecMethod.ssrSelector || '';
-    const el = document.querySelector(sel) as HTMLElement | null;
-    if (el) {
-      return samsungSpecificParser(el) || turndownService.turndown(el.outerHTML);
+    if (!sel) {
+      console.warn('[OptionScraper] SSR: ssrSelector is empty. Re-detect the spec method.');
+      return { specData: '', rawHtml: '' };
     }
-    return '';
+
+    if (detectedSpecMethod.specButtonSelector) {
+      const clicked = await clickBySelector(detectedSpecMethod.specButtonSelector);
+      console.log(`[OptionScraper] SSR: spec button click → ${clicked ? 'OK' : 'MISS'} (${detectedSpecMethod.specButtonSelector})`);
+    }
+
+    // Wait for DOM to settle — try up to 3 times with increasing delays
+    let el: HTMLElement | null = null;
+    const delays = [800, 1200, 1800];
+    for (const delay of delays) {
+      await pause(delay);
+      el = document.querySelector(sel) as HTMLElement | null;
+      if (el && el.offsetHeight > 0 && (el.textContent || '').trim().length > 30) {
+        console.log(`[OptionScraper] SSR: spec element found after ${delay}ms (${el.offsetHeight}px tall)`);
+        break;
+      }
+      console.warn(`[OptionScraper] SSR: element not ready after ${delay}ms, retrying...`);
+      el = null;
+    }
+
+    if (!el) {
+      console.error(`[OptionScraper] SSR: could not read spec from selector "${sel}"`);
+      return { specData: '', rawHtml: '' };
+    }
+
+    const rawHtml = el.outerHTML;
+    const specText = samsungSpecificParser(el) || turndownService.turndown(rawHtml);
+    console.log(`[OptionScraper] SSR: parsed spec length = ${specText.length}, rawHtml length = ${rawHtml.length}`);
+    return { specData: specText, rawHtml };
   }
-  return '';
+  return { specData: '', rawHtml: '' };
 };
 
 const startAutoIteration = async () => {
@@ -1736,6 +1951,94 @@ const startAutoIteration = async () => {
   showToast(`🚀 ${combinations.length}개 조합 자동 수집 시작...`, 0);
   updateOptionPanelContent();
 
+  // ── 현재 URL에서 모델 코드를 찾아 치환하는 헬퍼 ──
+  // Samsung Global: data-modelcode(예: QA85QN85FAUXKE) → 소문자가 URL에 포함됨
+  // qa85qn85fauxke → qa55qn85fauxke 치환으로 각 사이즈 페이지 URL 생성
+  const buildModelUrl = (targetModelCode: string): string | null => {
+    const baseUrl = location.href;
+    const targetLower = targetModelCode.toLowerCase();
+
+    // 모델코드에서 사이즈 숫자 추출 (예: QA55QN85FAUXKE → 55, QE75QN... → 75)
+    const extractSize = (code: string) => code.match(/^[A-Z]{1,2}(\d+)/i)?.[1] || '';
+    const targetSize = extractSize(targetModelCode);
+
+    // 모델코드 + inch 숫자를 한 번에 치환하는 헬퍼
+    const applySubstitution = (url: string, fromCode: string, fromSize: string): string => {
+      let result = url;
+      // 1) 모델코드 치환
+      const codeRe = new RegExp(fromCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      result = result.replace(codeRe, targetLower);
+      // 2) inch 앞 숫자 치환 (예: 85-inch → 55-inch)
+      if (fromSize && targetSize && fromSize !== targetSize) {
+        const sizeRe = new RegExp(`\\b${fromSize}(?=-inch\\b)`, 'g');
+        result = result.replace(sizeRe, targetSize);
+      }
+      return result;
+    };
+
+    // ① 현재 체크된 radio input의 data-modelcode로 현재 모델 탐색
+    const checkedInput = document.querySelector(
+      'input[data-modelcode][checked], input[data-modelcode].checked'
+    ) as HTMLInputElement | null;
+    const currentCode = checkedInput?.dataset.modelcode?.toLowerCase() || '';
+    const currentSize = extractSize(checkedInput?.dataset.modelcode || '');
+
+    if (currentCode && baseUrl.toLowerCase().includes(currentCode) && currentCode !== targetLower) {
+      const newUrl = applySubstitution(baseUrl, currentCode, currentSize);
+      if (newUrl !== baseUrl) {
+        console.log(`[OptionScraper] buildModelUrl: ${currentCode}(${currentSize}") → ${targetLower}(${targetSize}")`);
+        console.log(`[OptionScraper] URL: ${newUrl}`);
+        return newUrl;
+      }
+    }
+
+    // ② 폴백: 카테고리 버튼들의 modelCode 중 현재 URL에 있는 것 탐색
+    for (const cat of optionCategories) {
+      for (const btn of cat.buttons) {
+        const btnCodeLower = btn.modelCode?.toLowerCase() || '';
+        const btnSize = extractSize(btn.modelCode || '');
+        if (btnCodeLower && btnCodeLower !== targetLower && baseUrl.toLowerCase().includes(btnCodeLower)) {
+          const newUrl = applySubstitution(baseUrl, btnCodeLower, btnSize);
+          if (newUrl !== baseUrl) {
+            console.log(`[OptionScraper] buildModelUrl (fallback): ${btnCodeLower}(${btnSize}") → ${targetLower}(${targetSize}")`);
+            console.log(`[OptionScraper] URL: ${newUrl}`);
+            return newUrl;
+          }
+        }
+      }
+    }
+
+    console.warn(`[OptionScraper] buildModelUrl: could not find current model code in URL (${baseUrl})`);
+    return null;
+  };
+
+  // ── fetch로 타겟 URL의 HTML을 받아 스펙 파싱 ──
+  const fetchSpecFromModelUrl = async (url: string): Promise<{ specData: string; rawHtml: string }> => {
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) {
+        console.warn(`[OptionScraper] fetchSpecFromModelUrl: HTTP ${res.status} for ${url}`);
+        return { specData: '', rawHtml: '' };
+      }
+      const html = await res.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+
+      // ssrSelector로 스펙 영역 탐색, 없으면 전체 body
+      const ssrSel = detectedSpecMethod?.ssrSelector || '';
+      const specEl = (ssrSel ? doc.querySelector(ssrSel) : null) as HTMLElement | null;
+      const targetEl = specEl || doc.body;
+
+      const parsed = samsungSpecificParser(targetEl);
+      const specData = parsed || turndownService.turndown(targetEl.outerHTML);
+      console.log(`[OptionScraper] fetchSpecFromModelUrl: specData.length=${specData.length}`);
+      return { specData, rawHtml: targetEl.outerHTML };
+    } catch (err) {
+      console.error('[OptionScraper] fetchSpecFromModelUrl error:', err);
+      return { specData: '', rawHtml: '' };
+    }
+  };
+
   for (let i = 0; i < combinations.length; i++) {
     const combo = combinations[i];
     const labelMap: Record<string, string> = {};
@@ -1743,34 +2046,78 @@ const startAutoIteration = async () => {
 
     showToast(`⏳ [${i + 1}/${combinations.length}] ${Object.values(labelMap).join(' / ')} 수집 중...`, 0);
 
-    // Click each option button in this combination
-    for (const [catName, btn] of Object.entries(combo)) {
-      const cat = optionCategories.find(c => c.name === catName);
-      await clickBySelector(btn.selector, btn.text, cat?.buttons[0]?.selector);
-      await pause(350);
-    }
-
-    const prevUrl = location.href;
-    const afterUrl = await waitForUrlSettle(prevUrl, 1200);
-    await pause(400); // let page settle
-
     const comboKey = Object.values(labelMap).join('/');
     let specData = '';
-    try {
-      specData = await collectSpecData(comboKey);
-    } catch (err) {
-      console.error('[Option Scraper] spec collect error:', err);
+    let rawHtml = '';
+
+    // ── 전략 1: modelCode 치환으로 fetch (Samsung Global radio 패턴) ──
+    // data-modelcode="QA55QN85FAUXKE" → 소문자 qa55qn85fauxke가 URL에 포함되어 있으므로 치환 가능
+    const targetBtnDef = Object.values(combo)
+      .map(btn => optionCategories.flatMap(c => c.buttons).find(b => b.selector === btn.selector))
+      .find(b => b?.modelCode);
+    const targetModelCode = targetBtnDef?.modelCode;
+
+    if (targetModelCode && detectedSpecMethod.type === 'SSR') {
+      const modelUrl = buildModelUrl(targetModelCode);
+      if (modelUrl) {
+        showToast(`⏳ [${i + 1}/${combinations.length}] ${comboKey} — 페이지 fetch 중...`, 0);
+        ({ specData, rawHtml } = await fetchSpecFromModelUrl(modelUrl));
+      }
+    }
+
+    // ── 전략 2: href 기반 fetch ──
+    if (!specData) {
+      const hrefBtnDef = Object.values(combo).map(btn =>
+        optionCategories.flatMap(c => c.buttons).find(b => b.selector === btn.selector && b.href)
+      ).find(Boolean);
+
+      if (hrefBtnDef?.href && detectedSpecMethod.type === 'SSR') {
+        showToast(`⏳ [${i + 1}/${combinations.length}] ${comboKey} — 링크 fetch 중...`, 0);
+        console.log(`[OptionScraper] href fetch: ${hrefBtnDef.href}`);
+        ({ specData, rawHtml } = await fetchSpecFromModelUrl(hrefBtnDef.href));
+      }
+    }
+
+    // ── 전략 3: 버튼 클릭 후 DOM/URL 변화 감지 (기존 방식 폴백) ──
+    if (!specData) {
+      // 버튼 클릭
+      for (const [catName, btn] of Object.entries(combo)) {
+        const cat = optionCategories.find(c => c.name === catName);
+        await clickBySelector(btn.selector, btn.text, cat?.buttons[0]?.selector);
+        await pause(350);
+      }
+
+      const prevUrl = location.href;
+      const afterUrl = await waitForUrlSettle(prevUrl, 1200);
+      await pause(400);
+
+      try {
+        ({ specData, rawHtml } = await collectSpecData(comboKey));
+      } catch (err) {
+        console.error('[Option Scraper] spec collect error:', err);
+      }
+
+      optionIterationResults.push({
+        labels: labelMap,
+        afterUrl,
+        renderingType: detectedSpecMethod?.type || 'UNKNOWN',
+        specData,
+        rawHtml: rawHtml || undefined
+      });
+      updateOptionPanelContent();
+      await pause(400);
+      continue; // 전략 3은 afterUrl이 다르므로 별도 push 후 continue
     }
 
     optionIterationResults.push({
       labels: labelMap,
-      afterUrl,
+      afterUrl: location.href,
       renderingType: detectedSpecMethod?.type || 'UNKNOWN',
-      specData
+      specData,
+      rawHtml: rawHtml || undefined
     });
-
     updateOptionPanelContent();
-    await pause(400);
+    await pause(300);
   }
 
   isAutoIterating = false;
@@ -1984,10 +2331,15 @@ const showSpecPreviewModal = () => {
       }
     }
   } else if (optionIterationResults.length > 0) {
-    // optionIterationResults만 있는 경우 → specData 직접 사용
+    // SSR 또는 goodsIds 없는 경우 → specData + rawHtml 직접 사용
     optionIterationResults.forEach(e => {
       const key = Object.values(e.labels).join(' / ');
-      previewItems.push({ goodsId: key, goodsNm: key, rawHtml: '', parsedSpec: e.specData || '' });
+      previewItems.push({
+        goodsId: key,
+        goodsNm: key,
+        rawHtml: e.rawHtml || '',          // SSR: el.outerHTML 저장됨
+        parsedSpec: e.specData || ''
+      });
     });
   } else {
     // goodsIds만 있는 경우 (기존 로직)
@@ -2023,22 +2375,22 @@ const showSpecPreviewModal = () => {
              white-space:nowrap;transition:all 0.15s;">${item.goodsNm}</button>
   `).join('');
 
-  const firstItem = previewItems[0];
-  const htmlNoscript = firstItem?.rawHtml
-    ? firstItem.rawHtml.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->').trim()
-    : '(캐시된 HTML 없음)';
+  const isSSRMode = detectedSpecMethod?.type === 'SSR';
 
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;
                 padding:16px 20px 10px;border-bottom:2px solid #334155;flex-shrink:0;">
       <div>
-        <strong style="color:#38bdf8;font-size:15px;">🔍 수집된 스펙 HTML 미리보기</strong>
-        <div style="font-size:11px;color:#6b7280;margin-top:2px;">AI 전송 전 각 상품의 응답 HTML과 파싱 결과를 확인하세요</div>
+        <strong style="color:#38bdf8;font-size:15px;">🔍 수집된 스펙 ${isSSRMode ? 'DOM' : 'API'} 미리보기</strong>
+        <div style="font-size:11px;color:#6b7280;margin-top:2px;">AI 전송 전 각 ${isSSRMode ? '옵션의 DOM HTML' : '상품의 응답 HTML'}과 파싱 결과를 확인하세요</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
         ${optionIterationResults.length > 0 && goodsIds.length > 0 ? `
         <span style="background:#1e3a5f;color:#93c5fd;padding:2px 8px;border-radius:4px;font-size:11px;">
-          optionIterationResults(${optionIterationResults.length}) × goodsIds(${goodsIds.length}) → ${previewItems.length}개 항목
+          CSR · ${optionIterationResults.length} 조합 × ${goodsIds.length} 상품 → ${previewItems.length}개
+        </span>` : isSSRMode ? `
+        <span style="background:#1a2e46;color:#3b82f6;padding:2px 8px;border-radius:4px;font-size:11px;">
+          SSR DOM · ${previewItems.length}개 항목
         </span>` : `
         <span style="background:#0d3b1e;color:#10b981;padding:2px 8px;border-radius:4px;font-size:11px;">
           ${specListUrl.split('/').pop() || 'API'} · ${previewItems.length}개 항목
@@ -2060,7 +2412,9 @@ const showSpecPreviewModal = () => {
       <div style="flex:1;display:flex;flex-direction:column;border-right:1px solid #334155;min-width:0;">
         <div style="padding:8px 12px;background:#0f172a;border-bottom:1px solid #1e293b;flex-shrink:0;
                     display:flex;justify-content:space-between;align-items:center;">
-          <span style="font-size:11px;color:#6b7280;font-weight:bold;">📄 원본 HTML <span style="color:#374151;">(스크립트 제거)</span></span>
+          <span style="font-size:11px;color:#6b7280;font-weight:bold;">
+            ${isSSRMode ? '🖥️ 캡처된 DOM HTML <span style="color:#374151;">(스크립트 제거)</span>' : '📄 원본 API HTML <span style="color:#374151;">(스크립트 제거)</span>'}
+          </span>
           <div style="display:flex;gap:6px;">
             <input id="ws-spec-html-search" type="text" placeholder="검색..."
               style="background:#1e293b;border:1px solid #334155;border-radius:4px;
@@ -2073,7 +2427,7 @@ const showSpecPreviewModal = () => {
         <pre id="ws-spec-html-pre"
           style="margin:0;padding:12px;font-family:'Courier New',monospace;font-size:10.5px;
                  white-space:pre-wrap;word-break:break-all;color:#93c5fd;overflow-y:auto;flex:1;
-                 line-height:1.5;">${escapeHtml(htmlNoscript)}</pre>
+                 line-height:1.5;"></pre>
       </div>
 
       <!-- RIGHT: Parsed Spec -->
@@ -2088,7 +2442,7 @@ const showSpecPreviewModal = () => {
         <pre id="ws-spec-parsed-pre"
           style="margin:0;padding:12px;font-family:'Courier New',monospace;font-size:11px;
                  white-space:pre-wrap;word-break:break-all;color:#34d399;overflow-y:auto;flex:1;
-                 line-height:1.5;">${escapeHtml(firstItem?.parsedSpec || '(파싱 결과 없음 — HTML 확인 필요)')}</pre>
+                 line-height:1.5;"></pre>
       </div>
     </div>
 
@@ -2117,51 +2471,64 @@ const showSpecPreviewModal = () => {
     sendOptionResultsToAI();
   });
 
-  // Tab switching
+  // ── Tab switching (currentTabIdx 추적으로 안정적 렌더링) ──
+  let currentTabIdx = 0;
+
   const renderTab = (idx: number) => {
     const item = previewItems[idx];
     if (!item) return;
+    currentTabIdx = idx;
 
     const noScript = item.rawHtml
       ? item.rawHtml.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->').trim()
-      : '(캐시된 HTML 없음 — 이 goodsId는 캐시에 없습니다)';
+      : isSSRMode
+        ? '(이 항목의 DOM HTML이 캡처되지 않았습니다)'
+        : '(캐시된 API HTML 없음)';
 
+    // 콘텐츠 업데이트
     const htmlPre = document.getElementById('ws-spec-html-pre');
     const parsedPre = document.getElementById('ws-spec-parsed-pre');
     if (htmlPre) htmlPre.innerHTML = escapeHtml(noScript);
     if (parsedPre) parsedPre.innerHTML = escapeHtml(item.parsedSpec || '(파싱 결과 없음)');
 
-    // Update tab styles
+    // 검색 초기화
+    const searchInput = document.getElementById('ws-spec-html-search') as HTMLInputElement | null;
+    if (searchInput) searchInput.value = '';
+
+    // 탭 스타일 업데이트
     document.querySelectorAll('.ws-spec-tab').forEach((btn, i) => {
-      (btn as HTMLElement).style.color = i === idx ? '#38bdf8' : '#6b7280';
-      (btn as HTMLElement).style.borderBottomColor = i === idx ? '#38bdf8' : 'transparent';
-      (btn as HTMLElement).style.fontWeight = i === idx ? 'bold' : 'normal';
+      const el = btn as HTMLElement;
+      el.style.color = i === idx ? '#38bdf8' : '#6b7280';
+      el.style.borderBottomColor = i === idx ? '#38bdf8' : 'transparent';
+      el.style.fontWeight = i === idx ? 'bold' : 'normal';
     });
 
-    // Rebind copy buttons for current item
-    document.getElementById('ws-spec-copy-html')?.removeEventListener('click', () => {});
-    document.getElementById('ws-spec-copy-html')?.addEventListener('click', () => {
+    // 복사 버튼 — onclick으로 교체 (기존 핸들러 자동 덮어쓰기)
+    const copyHtmlBtn = document.getElementById('ws-spec-copy-html') as HTMLButtonElement | null;
+    const copyParsedBtn = document.getElementById('ws-spec-copy-parsed') as HTMLButtonElement | null;
+    if (copyHtmlBtn) copyHtmlBtn.onclick = () => {
       navigator.clipboard.writeText(item.rawHtml || noScript).then(() => showToast('✅ HTML 복사 완료!', 2000));
-    });
-    document.getElementById('ws-spec-copy-parsed')?.addEventListener('click', () => {
+    };
+    if (copyParsedBtn) copyParsedBtn.onclick = () => {
       navigator.clipboard.writeText(item.parsedSpec || '').then(() => showToast('✅ 스펙 복사 완료!', 2000));
-    });
+    };
   };
 
-  // Initial tab event bindings
-  document.querySelectorAll('.ws-spec-tab').forEach(btn => {
-    btn.addEventListener('click', () => renderTab(parseInt((btn as HTMLElement).dataset.idx || '0')));
+  // 탭 클릭 이벤트 (이벤트 위임: box 한 군데에서 처리)
+  box.addEventListener('click', e => {
+    const btn = (e.target as HTMLElement).closest('.ws-spec-tab') as HTMLElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const idx = parseInt(btn.dataset.idx || '0', 10);
+    renderTab(idx);
   });
 
-  // Search in HTML
+  // 검색 in HTML
   document.getElementById('ws-spec-html-search')?.addEventListener('input', e => {
     const q = (e.target as HTMLInputElement).value.trim().toLowerCase();
     const pre = document.getElementById('ws-spec-html-pre');
     if (!pre) return;
-    const currentIdx = Array.from(document.querySelectorAll('.ws-spec-tab')).findIndex(
-      b => (b as HTMLElement).style.fontWeight === 'bold'
-    );
-    const item = previewItems[currentIdx >= 0 ? currentIdx : 0];
+    const item = previewItems[currentTabIdx];
     const noScript = (item?.rawHtml || '').replace(/<script[\s\S]*?<\/script>/gi, '<!-- script 제거됨 -->');
     if (!q) { pre.innerHTML = escapeHtml(noScript); return; }
     pre.innerHTML = escapeHtml(noScript).replace(
@@ -2170,12 +2537,7 @@ const showSpecPreviewModal = () => {
     );
   });
 
-  // Initial copy bindings for tab 0
-  document.getElementById('ws-spec-copy-html')?.addEventListener('click', () => {
-    navigator.clipboard.writeText(firstItem?.rawHtml || '').then(() => showToast('✅ HTML 복사 완료!', 2000));
-  });
-  document.getElementById('ws-spec-copy-parsed')?.addEventListener('click', () => {
-    navigator.clipboard.writeText(firstItem?.parsedSpec || '').then(() => showToast('✅ 스펙 복사 완료!', 2000));
-  });
+  // 초기 탭 0 렌더링 (innerHTML 정적 초기값 대신 renderTab으로 통일)
+  renderTab(0);
 };
 
