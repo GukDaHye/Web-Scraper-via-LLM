@@ -1126,16 +1126,70 @@ const startOptionCategoryDrag = () => {
 };
 
 const processSelectedArea = (rect: { left: number; top: number; right: number; bottom: number }) => {
-  const candidates = document.querySelectorAll('button, a, [role="button"], [role="option"], [role="tab"], li');
   const found: Array<{ text: string; el: HTMLElement }> = [];
+  const foundEls = new Set<HTMLElement>();
 
-  candidates.forEach(el => {
-    if (el.closest('#web-scraper-option-panel')) return;
+  // ── 헬퍼: 요소에서 레이블 텍스트 추출 (텍스트 없으면 img.alt → img src 파일명 순으로 폴백) ──
+  const extractLabel = (el: HTMLElement): string => {
+    let text = el.textContent?.trim().replace(/\s+/g, ' ') || '';
+    if (!text) {
+      const img = el.querySelector('img');
+      if (img) {
+        text = img.alt?.trim() || img.src.split('/').pop()?.split('?')[0] || '';
+      }
+    }
+    return text;
+  };
+
+  // ── 헬퍼: 드래그 영역 안에 있는지 확인 ──
+  const inRect = (el: HTMLElement): boolean => {
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
-      const text = el.textContent?.trim().replace(/\s+/g, ' ') || '';
-      if (text && text.length > 0 && text.length < 80) found.push({ text, el: el as HTMLElement });
+    return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
+  };
+
+  const tryAdd = (el: HTMLElement) => {
+    if (foundEls.has(el)) return;
+    if (el.closest('#web-scraper-option-panel')) return;
+    if (!inRect(el)) return;
+    const text = extractLabel(el);
+    if (text && text.length > 0 && text.length < 80) {
+      found.push({ text, el });
+      foundEls.add(el);
+    }
+  };
+
+  // ── ① 기존 텍스트 기반 후보 (버튼·링크·li 등) ──
+  document.querySelectorAll('button, a, [role="button"], [role="option"], [role="tab"], li').forEach(el => {
+    tryAdd(el as HTMLElement);
+  });
+
+  // ── ② 이미지 기반 옵션 (무신사 등: div>img 구조) ──
+  // 드래그 영역 내 img를 찾아 클릭 단위가 되는 부모 컨테이너를 추가
+  document.querySelectorAll('img').forEach(img => {
+    if (img.closest('#web-scraper-option-panel')) return;
+    const imgRect = img.getBoundingClientRect();
+    const cx = imgRect.left + imgRect.width / 2, cy = imgRect.top + imgRect.height / 2;
+    if (cx < rect.left || cx > rect.right || cy < rect.top || cy > rect.bottom) return;
+
+    // img 부모부터 올라가며 클릭 가능한 컨테이너를 탐색
+    let container: HTMLElement | null = img.parentElement;
+    while (container && container !== document.body) {
+      const tag = container.tagName.toLowerCase();
+      const role = container.getAttribute('role') || '';
+      const isClickable = tag === 'a' || tag === 'button' || tag === 'li' ||
+        role === 'button' || role === 'option' || role === 'tab' ||
+        container.onclick !== null ||
+        window.getComputedStyle(container).cursor === 'pointer';
+
+      if (isClickable) { tryAdd(container); break; }
+
+      // 형제 이미지가 동일 부모 아래에 있으면 (이미지 그리드 구조) 직접 부모를 사용
+      const siblingsWithImg = Array.from(container.parentElement?.children || [])
+        .filter(c => c !== container && c.querySelector('img'));
+      if (siblingsWithImg.length >= 1) { tryAdd(container); break; }
+
+      container = container.parentElement;
     }
   });
 
