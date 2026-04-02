@@ -4,6 +4,25 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('Web Scraper Extension Installed');
 });
 
+const getApiConfig = (apiKey: string) => {
+  const isSsafy = apiKey.startsWith('S14P');
+  if (isSsafy) {
+    return {
+      url: 'https://gms.ssafy.io/gmsapi/generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey 
+      } as Record<string, string>
+    };
+  }
+  return {
+    url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    headers: {
+      'Content-Type': 'application/json'
+    } as Record<string, string>
+  };
+};
+
 const callGeminiAPI = async (apiKey: string, extractedItems: string[]) => {
   if (!apiKey) throw new Error('API Key missing');
 
@@ -17,16 +36,22 @@ const callGeminiAPI = async (apiKey: string, extractedItems: string[]) => {
     const prompt = `
       You are an intelligent web scraper data extractor.
       I will provide you with a list of extracted markdown sections representing items from a webpage.
-      Please extract the core data points (like title, model, price, specific specs, description, etc.) from each item.
-      Return the result strictly as a valid JSON array of objects.
+      
+      IMPORTANT:
+      - Each item often contains a "Detailed Specs" or "SSR Detailed Specs" section at the end.
+      - These sections contain the most critical technical data (Weight, Resolution, Power, Ports, etc.).
+      - You MUST extract EVERY technical data point from these sections and include them in the resulting JSON object.
+      - Do not summarize. Be as detailed as possible.
+      - Return the result strictly as a valid JSON array of objects.
       
       Here is the data:
       ${combinedMarkdown}
     `;
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+    const config = getApiConfig(apiKey);
+    const response = await fetch(config.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: config.headers,
       body: JSON.stringify({
         contents: [{
           parts: [{ text: prompt }]
@@ -121,62 +146,90 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse): boolean =
 
     sendResponse({ status: 'Processing started in background' });
   } else if (request.action === 'analyze_api_rule') {
+    sendResponse({ status: 'processing' });
     chrome.storage.sync.get(['apiKey'], async (result) => {
       try {
         if (!result.apiKey) throw new Error('API Key missing. Please config in popup.');
         
-        const payloadStr = JSON.stringify(request.requestPayload, null, 2);
-        const prompt = `You are an intelligent API reverse-engineering AI. I intercepted a network request fired when the user clicked a "Product Specs" button within a product card HTML.
-Your job is to find which parameter in the API Request uniquely identifies this product, and find exactly where that parameter value exists in the PRODUCT CARD HTML.
+        const payloads = request.requestPayloads || (request.requestPayload ? [request.requestPayload] : []);
+        const payloadStr = payloads.length > 0 ? JSON.stringify(payloads, null, 2) : "NO_NETWORK_REQUEST_CAPTURED";
+        
+        const prompt = `--- PRODUCT CARD MARKDOWN BEFORE ---
+${request.beforeHtml}
 
---- API REQUEST ---
+--- PRODUCT CARD MARKDOWN AFTER ---
+${request.afterHtml}
+
+--- HINT: USER PICKED DETAIL AREA (MARKDOWN) ---
+${request.detailHintHtml || "NONE"}
+
+--- HINT: CLICKED ANCHOR TARGET AREA (MARKDOWN) ---
+${request.targetAreaHtml || "NONE"}
+
+--- INTERCEPTED NETWORK LOGS ---
 ${payloadStr}
 
---- PRODUCT CARD HTML ---
-${request.cardHtml}
+Your Job:
+1. Determine if it's CSR (API fetch) or SSR (DOM content appears/hides) for getting product specifications.
+2. For SAMSUNG regions: 
+   - KOREA (sec.com) usually uses CSR via:
+     * 'xhr/goods/goodsSpec' (for single specs)
+     * 'xhr/goods/getGoodsSpecList' (for package/multiple specs)
+     * Parameters: 'goodsId', 'goodsTpCd', 'goodsNm'.
+   - GLOBAL (e.g. africa_en) usually uses SSR where specs are in 'pdd32' classes but hidden until 'Expand all' is clicked.
+3. If CSR: identify the API URL, Method (usually POST for Korea) from the logs, and DOM mapping for 'goodsId'.
+4. If SSR: identify 'specDomSelector' (look for 'pdd32-product-spec').
+5. Set 'requiresClick' to true if the content is hidden by default.
+6. Generate a Diagnosis in Korean (\`diagnosis_ko\`) explaining exactly why you chose this strategy for this specific region.
+7. Return ONLY JSON.
 
-Return a STRICT JSON object in this exact schema, identifying the variable mapping:
+Schema:
 {
-  "apiUrl": "Base API URL without dynamic variable (e.g., https://.../getSpec)",
-  "apiMethod": "GET or POST",
-  "urlParams": [
-    {
-      "type": "body or query",
-      "targetParam": "the exact key name in the API (e.g., goodsId or productId)",
-      "domSelector": "CSS selector to find this value in the HTML (e.g., [data-goods-id] or input.checkbox)",
-      "domAttribute": "Name of the HTML attribute containing the value (e.g., data-goods-id, value, id). Use 'textContent' if it is inside the tag."
-    }
-  ],
-  "staticBodyParams": {
-     "key": "Any static value that should always be sent (excluding the dynamic targetParam above)"
-  }
+  "renderingType": "CSR" | "SSR",
+  "apiUrl": "string (for CSR)",
+  "specDomSelector": "string (for SSR)",
+  "requiresClick": boolean,
+  "diagnosis_ko": "string",
+  "urlParams": [ { "targetParam": "goodsId", "domSelector": "string", "domAttribute": "string" } ],
+  "staticBodyParams": { "string": "string" }
 }
-Return ONLY valid JSON. If it's impossible to map, return { "error": "Cannot find mapping" }.`;
+Return ONLY valid JSON. If impossible, { "error": "Cannot find mapping" }.`;
 
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${result.apiKey}`;
-        const aiRes = await fetch(apiUrl, {
+        const config = getApiConfig(result.apiKey);
+        const aiRes = await fetch(config.url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: config.headers,
           body: JSON.stringify({
              contents: [{ role: 'user', parts: [{ text: prompt }] }],
              generationConfig: { responseMimeType: 'application/json' }
           })
         });
 
-        if (!aiRes.ok) throw new Error(`AI API Error: ${aiRes.statusText}`);
-        
+        if (aiRes.status === 429) {
+           throw new Error("Gemini API 할당량 초과! 무료 티어 제한으로 인해 약 1분 후 다시 시도해 주세요.");
+        }
+        if (!aiRes.ok) {
+           throw new Error(`Gemini API Error: ${aiRes.status} ${aiRes.statusText}`);
+        }
+
         const aiData = await aiRes.json();
-        const ruleText = aiData.candidates[0].content.parts[0].text;
+        let ruleText = aiData.candidates[0].content.parts[0].text;
+        
+        // Robust JSON extraction (removes ```json ... ``` markers)
+        const jsonMatch = ruleText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            ruleText = jsonMatch[0];
+        }
+
         const ruleJson = JSON.parse(ruleText);
         
         if (ruleJson.error) throw new Error(ruleJson.error);
 
-        chrome.storage.sync.set({ apiExtractionRule: JSON.stringify(ruleJson) }, () => {
-             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                if (tabs.length > 0 && tabs[0].id) {
-                   chrome.tabs.sendMessage(tabs[0].id, { action: 'sniffing_rule_saved', ruleJson });
-                }
-             });
+        // DO NOT SAVE YET. Send to content script for user confirmation.
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs.length > 0 && tabs[0].id) {
+                chrome.tabs.sendMessage(tabs[0].id, { action: 'sniffing_rule_saved', ruleJson }).catch(() => {});
+            }
         });
 
       } catch (err: any) {
@@ -188,8 +241,223 @@ Return ONLY valid JSON. If it's impossible to map, return { "error": "Cannot fin
         });
       }
     });
-    sendResponse({ status: 'Analyzing API rule in background' });
+  } else if (request.action === 'analyze_option_states') {
+    sendResponse({ status: 'Analyzing option states in background' });
+    chrome.storage.sync.get(['apiKey'], async (result) => {
+      try {
+        if (!result.apiKey) throw new Error('API Key missing. Please config in popup.');
+
+        const entries = request.optionEntries || [];
+        const entrySummary = entries.map((e: any, i: number) => {
+          const labels = Object.entries(e.labels || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+          return `--- 조합 ${i + 1} [${e.renderingType}] ---\n옵션: ${labels}\nURL: ${e.afterUrl || 'N/A'}\n스펙:\n${(e.specData || '(없음)').slice(0, 600)}`;
+        }).join('\n\n');
+
+        // KEY: Use markdown sections instead of JSON to avoid code-inside-JSON escaping issues.
+        // Python code embedded in JSON always breaks the parser (backslashes, quotes, newlines).
+        const prompt = `당신은 웹 크롤링 자동화 전문가입니다.
+상품 상세 페이지(${request.pageUrl || ''})에서 각 옵션 조합을 클릭하며 수집한 데이터가 있습니다.
+
+[수집된 옵션별 스펙 데이터]
+${entrySummary}
+
+아래 3가지를 분석해 주세요:
+1. URL에서 SKU를 식별하는 파라미터 패턴 (예: ?goodsId=XXX, /p/SKU). 없으면 "SSR 방식".
+2. 옵션명 → SKU → 주요 스펙 차이점 매핑 테이블 (JSON 배열 형식).
+3. 모든 옵션 조합의 스펙을 자동 수집하는 Python 스크립트.
+   - CSR 방식이면 requests 라이브러리로 API 직접 호출
+   - SSR 방식이면 Playwright로 클릭 후 DOM 파싱
+
+반드시 아래 형식으로만 응답하세요 (다른 설명 없이):
+
+## SKU_PATTERN
+(단 한 줄로 SKU 파라미터 패턴 설명)
+
+## MAPPING_TABLE_JSON
+[
+  { "labels": {}, "sku": "", "keySpecs": {} }
+]
+
+## PYTHON_CODE
+\`\`\`python
+(완전한 Python 스크립트)
+\`\`\``;
+
+        const config = getApiConfig(result.apiKey);
+        const aiRes = await fetch(config.url, {
+          method: 'POST',
+          headers: config.headers,
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 8192, temperature: 0.2 }
+          })
+        });
+
+        if (aiRes.status === 429) throw new Error('Gemini API 할당량 초과! 잠시 후 다시 시도해 주세요.');
+        if (!aiRes.ok) throw new Error(`Gemini API Error: ${aiRes.status} ${aiRes.statusText}`);
+
+        const aiData = await aiRes.json();
+        const rawText: string = aiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (!rawText) throw new Error('AI가 빈 응답을 반환했습니다.');
+
+        // ── Parse markdown sections ──────────────────────────
+        const extractSection = (header: string, nextHeader?: string): string => {
+          const start = rawText.indexOf(`## ${header}`);
+          if (start === -1) return '';
+          const contentStart = rawText.indexOf('\n', start) + 1;
+          const end = nextHeader ? rawText.indexOf(`## ${nextHeader}`, contentStart) : rawText.length;
+          return rawText.slice(contentStart, end === -1 ? rawText.length : end).trim();
+        };
+
+        const skuRaw = extractSection('SKU_PATTERN', 'MAPPING_TABLE_JSON');
+        const mappingRaw = extractSection('MAPPING_TABLE_JSON', 'PYTHON_CODE');
+        const codeRaw = extractSection('PYTHON_CODE');
+
+        // Parse mapping table JSON (isolated from code, so safe to parse)
+        let mappingTable: any[] = [];
+        try {
+          const arrMatch = mappingRaw.match(/\[[\s\S]*\]/);
+          if (arrMatch) mappingTable = JSON.parse(arrMatch[0]);
+        } catch {
+          mappingTable = [];
+        }
+
+        // Extract Python code from fenced block
+        const codeMatch = codeRaw.match(/```python\s*([\s\S]*?)```/) || codeRaw.match(/```\s*([\s\S]*?)```/);
+        const pythonCode = codeMatch ? codeMatch[1].trim() : codeRaw.trim();
+
+        const parsed = {
+          skuPattern: skuRaw || '패턴 분석 실패',
+          mappingTable,
+          pythonCode: pythonCode || '# AI 코드 생성에 실패했습니다.',
+          rawResponse: rawText.slice(0, 1000)  // for debugging
+        };
+
+        console.log('[background] analyze_option_states result:', {
+          skuPattern: parsed.skuPattern,
+          mappingRows: parsed.mappingTable.length,
+          codeLines: parsed.pythonCode.split('\n').length
+        });
+
+        chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+          if (tabs.length > 0 && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { action: 'option_analysis_complete', result: parsed }).catch(() => {});
+          }
+        });
+      } catch (err: any) {
+        console.error('[background] analyze_option_states error:', err);
+        chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+          if (tabs.length > 0 && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { action: 'option_analysis_error', message: err.message }).catch(() => {});
+          }
+        });
+      }
+    });
   }
 
   return true;
+});
+
+// Sniffer function to be injected into the MAIN world
+function mainWorldSniffer() {
+  if ((window as any).__WEB_SCRAPER_SNIFFER_ACTIVE) return;
+  (window as any).__WEB_SCRAPER_SNIFFER_ACTIVE = true;
+
+  const originalFetch = window.fetch;
+  window.fetch = async function(...args) {
+    let url = '';
+    let body = '';
+    const req = args[0];
+    if (typeof req === 'string') { url = req; } 
+    else if (req instanceof Request) { url = req.url; }
+    
+    let method = 'GET';
+    if (args[1] && args[1].method) { method = args[1].method; } 
+    else if (req instanceof Request) { method = req.method; }
+
+    if (args[1] && args[1].body) {
+      if (typeof args[1].body === 'string') { body = args[1].body; } 
+      else if (args[1].body instanceof URLSearchParams) { body = args[1].body.toString(); }
+    }
+    
+    const requestId = Math.random().toString(36).substring(2, 10);
+    
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { requestId, stage: 'start', type: 'fetch', url: url, method: method, body: body }
+    }));
+
+    const response = await originalFetch.apply(this, args);
+    
+    // Stage 2: Request Complete (After Response)
+    try {
+      const clonedResponse = response.clone();
+      const bodyText = await clonedResponse.text();
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { requestId, stage: 'complete', type: 'fetch', url: url, method: method, body: body, response: bodyText }
+      }));
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { requestId, stage: 'complete', type: 'fetch', url: url, method: method, body: body, response: '(Cannot read body)' }
+      }));
+    }
+    
+    return response;
+  };
+
+  const originalXhrOpen = XMLHttpRequest.prototype.open;
+  const originalXhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method: string, url: string | URL, ...args: any[]) {
+    (this as any)._method = method; 
+    (this as any)._url = url;
+    (this as any)._requestId = Math.random().toString(36).substring(2, 10);
+    return originalXhrOpen.apply(this, [method, url, ...args] as any);
+  };
+  XMLHttpRequest.prototype.send = function(body: any) {
+    let parsedBody = '';
+    if (typeof body === 'string') { parsedBody = body; } 
+    else if (body instanceof URLSearchParams) { parsedBody = body.toString(); }
+
+    const requestId = (this as any)._requestId;
+
+    // Stage 1: Request Start (Immediate)
+    window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+      detail: { requestId, stage: 'start', type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody }
+    }));
+
+    // Stage 2: Request Complete (After Response)
+    this.addEventListener('load', function() {
+      let responseBody = '';
+      try {
+        if (!this.responseType || this.responseType === 'text') {
+          responseBody = this.responseText;
+        } else if (this.responseType === 'json') {
+          responseBody = JSON.stringify(this.response);
+        } else if (this.responseType === 'document') {
+          responseBody = this.response.documentElement.outerHTML;
+        } else {
+          responseBody = '[Non-textual data: ' + this.responseType + ']';
+        }
+      } catch (e) {
+        responseBody = '[Err reading response]';
+      }
+
+      window.dispatchEvent(new CustomEvent('__WEB_SCRAPER_NETWORK_HOOK', {
+        detail: { requestId, stage: 'complete', type: 'xhr', url: (this as any)._url, method: (this as any)._method, body: parsedBody, response: responseBody }
+      }));
+    });
+
+    return originalXhrSend.apply(this, [body]);
+  };
+  console.log("🚀 [WEB SCRAPER] Network Sniffer Injection Success (Reliability V2)");
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url?.startsWith('http')) {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: mainWorldSniffer,
+      world: 'MAIN'
+    }).catch(() => {}); // Ignore errors on protected pages
+  }
 });

@@ -66,7 +66,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   startBtn.addEventListener('click', async () => {
-    // Send message to the active tab's content script to start extraction
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     try {
       if (tab.id) {
@@ -76,6 +75,21 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (error) {
       statusMsg.textContent = 'Please refresh the page to use the extension.';
+      statusMsg.style.color = 'red';
+    }
+  });
+
+  // Option Scraper
+  const openOptionScraperBtn = document.getElementById('openOptionScraperBtn') as HTMLButtonElement;
+  openOptionScraperBtn?.addEventListener('click', async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    try {
+      if (tab.id) {
+        await chrome.tabs.sendMessage(tab.id, { action: 'open_option_scraper' });
+        window.close();
+      }
+    } catch {
+      statusMsg.textContent = '페이지를 새로고침 후 다시 시도해 주세요.';
       statusMsg.style.color = 'red';
     }
   });
